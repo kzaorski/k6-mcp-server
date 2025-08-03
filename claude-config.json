@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "k6-performance-testing": {
+      "command": "python",
+      "args": ["./src/server.py"],
+      "env": {
+        "PYTHONPATH": "./src"
+      }
+    }
+  }
+}
