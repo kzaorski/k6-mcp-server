@@ -8,33 +8,34 @@ export const options = {
     { duration: '10s', target: {{base_users}} },
     { duration: '{{duration}}', target: {{base_users}} },
   ],
-  {{#if thresholds}}
-  thresholds: {
-    {{#each thresholds}}
-    '{{@key}}': ['{{this}}'],
-    {{/each}}
-  },
-  {{/if}}
+  {{thresholds_block}}
 };
 
 export default function() {
   const params = {
     headers: {
       'Content-Type': 'application/json',
+      {{custom_headers_block}}
+      {{auth_header_block}}
     },
+    timeout: '{{timeout}}',
+    {{cookies_block}}
   };
 
-  {{#if payload}}
-  const payload = JSON.stringify({{json payload}});
-  const response = http.{{method_lower}}('{{url}}', payload, params);
-  {{else}}
-  const response = http.{{method_lower}}('{{url}}', params);
-  {{/if}}
+  {{payload_block}}
 
   check(response, {
     'status is 200': (r) => r.status === 200,
     'response time < 500ms': (r) => r.timings.duration < 500,
   });
+
+  // Retry logic
+  let retries = {{retry_attempts}};
+  while (retries > 0 && response.status >= 400) {
+    console.log(`Retrying request, attempts left: ${retries}`);
+    {{retry_block}}
+    retries--;
+  }
 
   sleep(1);
 }

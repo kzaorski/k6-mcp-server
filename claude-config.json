@@ -1,10 +1,11 @@
 {
   "mcpServers": {
     "k6-performance-testing": {
-      "command": "python",
-      "args": ["./src/server.py"],
+      "command": "python3",
+      "args": ["server.py"],
+      "cwd": "/mnt/c/dev/mcpk6/k6-mcp-server/src",
       "env": {
-        "PYTHONPATH": "./src"
+        "PYTHONPATH": "/mnt/c/dev/mcpk6/k6-mcp-server/src"
       }
     }
   }
