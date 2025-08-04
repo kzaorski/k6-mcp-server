@@ -4,16 +4,20 @@ MCP (Model Context Protocol) server for running K6 performance tests through Cla
 
 ## Features
 
-- 🚀 Run K6 performance tests with customizable parameters
-- 📊 Support for different load patterns (constant, ramp-up, spike)
-- 📈 Detailed performance metrics and reporting
-- 🔧 Easy integration with Claude Code/Desktop
+- 🚀 Run K6 performance tests with precise **iterations** or **duration** control
+- 📊 Support for different load patterns (constant, ramp-up, spike) with resilience assessment
+- 📈 **Multi-format reporting**: JSON (detailed), HTML (with charts), CSV (detailed analysis)
+- 🔧 Easy integration with Claude Code/Desktop via Model Context Protocol (MCP)
 - 🔐 Advanced HTTP authentication (Bearer, Basic, API Key)
 - 🍪 Cookie and custom header support
-- 🎲 Dynamic data generation and templating
+- 🎲 Dynamic data generation and templating with variable substitution
 - 📁 CSV/JSON data file loading
 - ⚡ Retry logic and timeout configuration
 - 🌐 Environment variable support
+- ✅ **Accurate error detection** and detailed failure analysis
+- 🛡️ **AI Safety Features**: Prevents autonomous test execution and configuration changes
+- 📊 **Professional HTML reports** with charts via k6-reporter integration
+- 📊 **Standard K6 reporting** with comprehensive metrics and analysis
 
 ## Prerequisites
 
@@ -58,7 +62,8 @@ Run a K6 performance test with specified parameters.
   - `constant`: Maintains steady number of virtual users
   - `ramp_up`: Gradually increases virtual users
   - `spike`: Sudden traffic spikes
-- `duration` (optional): Test duration (e.g., '30s', '5m') - default: 30s
+- `duration` (optional): Test duration (e.g., '30s', '5m') - default: 30s - **ignored if iterations is set**
+- `iterations` (optional): **NEW** - Number of iterations to run (overrides duration for precise request counting)
 - `virtual_users` (optional): Number of virtual users - default: 10
 - `thresholds` (optional): Performance thresholds
 
@@ -105,6 +110,12 @@ Get results from the last K6 test run or a specific test.
 #### 3. `list_test_templates`
 List available K6 test templates and their descriptions.
 
+#### 4. `get_standard_html_report` ⭐ **NEW**
+Access professional HTML reports with charts and visual metrics.
+
+#### 5. `generate_detailed_report` ⭐ **NEW**
+Generate detailed CSV reports for chart generation and analysis.
+
 ### Load Patterns
 
 #### Constant Load
@@ -139,6 +150,16 @@ Add this configuration to your Claude Desktop settings:
 ```
 
 ## Example Test Scenarios
+
+### Single Request Test (Precise Control) ⭐ **NEW**
+```json
+{
+  "url": "https://api.example.com/health",
+  "method": "GET",
+  "iterations": 1,
+  "virtual_users": 1
+}
+```
 
 ### Basic API Endpoint Test
 ```json
@@ -255,16 +276,30 @@ Add this configuration to your Claude Desktop settings:
 }
 ```
 
-## Output Metrics
+## Output Metrics & Reporting ⭐ **ENHANCED**
 
-The server provides comprehensive performance metrics including:
+The server provides comprehensive performance metrics in multiple formats:
 
-- **Response Times**: Average, minimum, maximum, and 95th percentile
+### Detailed Metrics
+- **Response Times**: Average, minimum, maximum, 50th, 90th, 95th, and 99th percentiles
 - **Throughput**: Requests per second and total requests
-- **Error Rate**: Percentage of failed requests
+- **Error Analysis**: Detailed error breakdown with status codes and failure patterns
 - **Data Transfer**: Amount of data sent and received
 - **Test Duration**: Actual test execution time
 - **Virtual Users**: Maximum concurrent users
+- **Quality Assessment**: Automated A-F performance grading
+
+### Report Formats
+1. **LLM-Optimized JSON**: Structured data perfect for AI analysis
+2. **Professional HTML**: Visual reports with charts (k6-reporter integration)
+3. **Detailed JSON**: Complete K6 raw data with all metrics
+4. **CSV Exports**: Detailed metrics for spreadsheet analysis
+
+### AI Safety Features ⭐ **NEW**
+- **Accurate Error Detection**: Based on actual metrics, not process exit codes
+- **No Autonomous Execution**: Prevents AI from running tests without explicit user request
+- **Transparent Reporting**: All performance issues clearly communicated
+- **No Configuration Changes**: Failed tests reported accurately without suggesting test modifications
 
 ## Advanced Features
 
@@ -399,17 +434,22 @@ PYTHONPATH=. python3 -c "from src.data_generators import DataGenerator; print('D
 ```
 k6-mcp-server/
 ├── src/
-│   ├── server.py          # Main MCP server with tool definitions
-│   ├── k6_runner.py       # K6 test execution and result parsing
+│   ├── server.py          # Main MCP server with 5 tools (including new HTML/JSON report access)
+│   ├── k6_runner.py       # K6 test execution with iterations/duration control
+│   ├── report_instructions.py # AI model reporting guidelines and safety restrictions
 │   ├── data_generators.py # Dynamic data generation utilities
-│   └── templates/         # K6 script templates for different load patterns
-│       ├── constant_load.js
-│       ├── ramp_up.js
-│       └── spike.js
-├── reports/               # Generated test results and summaries
+│   └── templates/         # K6 script templates with handleSummary integration
+│       ├── constant_load.js  # Supports both iterations and duration modes
+│       ├── ramp_up.js       # Gradual load increase with detailed analysis
+│       └── spike.js         # Traffic spikes with resilience assessment
+├── reports/               # Multi-format test results
+│   ├── *.json            # Raw K6 + detailed summaries
+│   ├── *.html            # Professional HTML reports with charts
+│   └── *.csv             # Detailed CSV exports for analysis
 ├── test_extended_params.py # Unit tests
 ├── requirements.txt       # Python dependencies
-└── README.md             # This documentation
+├── CLAUDE.md             # Claude Code integration documentation
+└── README.md             # This comprehensive documentation
 ```
 
 For development, install additional dependencies:

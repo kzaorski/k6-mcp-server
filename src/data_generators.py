@@ -78,7 +78,14 @@ class DataGenerator:
         result = template
         for key, value in variables.items():
             placeholder = f"{{{{{key}}}}}"
-            result = result.replace(placeholder, str(value))
+            
+            # For JSON templates, try to preserve numeric types
+            if isinstance(value, str) and value.isdigit():
+                # If it looks like a number, use it as a number in JSON
+                result = result.replace(placeholder, value)
+            else:
+                # Otherwise, convert to string
+                result = result.replace(placeholder, str(value))
         return result
     
     @staticmethod

@@ -226,10 +226,13 @@ $RECYCLE.BIN/
 # K6 specific files
 reports/*.json
 reports/*.js
+reports/*.csv
+reports/*.html
 k6-mcp-server/reports/*.json
 k6-mcp-server/reports/*.js
 test-api/reports/
 *.k6.js
+csv_data/*.csv
 
 # Generated/temporary test files (adjust as needed for your project)
 # test_*.py

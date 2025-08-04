@@ -1,5 +1,54 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
+import { Trend, Counter } from 'k6/metrics';
+// External report libraries - may fail due to network issues
+// import { htmlReport } from 'https://raw.githubusercontent.com/benc-uk/k6-reporter/main/dist/bundle.js';
+// import { textSummary } from 'https://jslib.k6.io/k6-summary/0.0.1/index.js';
+
+// Fallback simple HTML report generator
+function htmlReport(data) {
+  const metrics = data.metrics || {};
+  const duration = metrics.http_req_duration || {};
+  const reqs = metrics.http_reqs || {};
+  const failed = metrics.http_req_failed || {};
+  
+  return `<!DOCTYPE html>
+<html>
+<head><title>K6 Ramp-Up Test Report</title></head>
+<body>
+<h1>K6 Ramp-Up Performance Test Report</h1>
+<h2>Summary</h2>
+<ul>
+<li>Total Requests: ${reqs.count || 0}</li>
+<li>Failed Requests: ${Math.round((reqs.count || 0) * (failed.rate || 0))}</li>
+<li>Average Response Time: ${Math.round(duration.avg || 0)}ms</li>
+<li>95th Percentile: ${Math.round(duration['p(95)'] || 0)}ms</li>
+</ul>
+<h2>Generated: ${new Date().toISOString()}</h2>
+</body>
+</html>`;
+}
+
+// Fallback text summary
+function textSummary(data) {
+  const metrics = data.metrics || {};
+  const duration = metrics.http_req_duration || {};
+  const reqs = metrics.http_reqs || {};
+  
+  return `
+K6 Ramp-Up Test Results:
+========================
+• Total Requests: ${reqs.count || 0}
+• Avg Response Time: ${Math.round(duration.avg || 0)}ms
+• P95 Response Time: ${Math.round(duration['p(95)'] || 0)}ms
+• Success Rate: ${Math.round((1 - (metrics.http_req_failed?.rate || 0)) * 100)}%
+`;
+}
+
+// Custom metrics for detailed analysis
+const responseTimeTrend = new Trend('custom_response_time');
+const errorCounter = new Counter('custom_errors');
+const successCounter = new Counter('custom_success');
 
 export const options = {
   stages: [
@@ -21,12 +70,20 @@ export default function() {
     {{cookies_block}}
   };
 
+  {{request_logging_block}}
+
   {{payload_block}}
 
-  check(response, {
-    'status is 200': (r) => r.status === 200,
-    'response time < 500ms': (r) => r.timings.duration < 500,
-  });
+  // Record custom metrics
+  responseTimeTrend.add(response.timings.duration);
+  
+  if (response.status >= 200 && response.status < 400) {
+    successCounter.add(1);
+  } else {
+    errorCounter.add(1);
+  }
+
+  {{checks_block}}
 
   // Retry logic
   let retries = {{retry_attempts}};
@@ -36,5 +93,32 @@ export default function() {
     retries--;
   }
 
-  sleep(1);
+  sleep({{think_time}});
+}
+
+
+// K6 handleSummary callback - generates basic report formats (no LLM summaries)
+export function handleSummary(data) {
+  console.log('📊 Generating K6 ramp-up test reports...');
+  
+  try {
+    const htmlContent = htmlReport(data);
+    const textContent = textSummary(data);
+    
+    console.log('✅ Basic ramp-up report formats generated successfully');
+    
+    return {
+      'reports/{{test_id}}_standard_report.html': htmlContent,
+      'reports/{{test_id}}_detailed_summary.json': JSON.stringify(data, null, 2),
+      stdout: textContent,
+    };
+  } catch (error) {
+    console.error('❌ Error in ramp-up handleSummary():', error.message);
+    console.error('Stack:', error.stack);
+    
+    return {
+      'reports/{{test_id}}_error_log.txt': `Error in handleSummary(): ${error.message}\nStack: ${error.stack}\nData keys: ${Object.keys(data).join(', ')}`,
+      stdout: `Error generating ramp-up reports: ${error.message}`,
+    };
+  }
 }
