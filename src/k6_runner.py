@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
+from urllib.parse import urlencode
+
+from data_generators import DataGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +67,6 @@ class K6Runner:
             
             stdout, stderr = await process.communicate()
             
-            # Clean up temporary script
-            os.unlink(script_path)
-            
             if process.returncode == 0:
                 # Parse and format results
                 metrics = await self._parse_results(test_id)
@@ -114,11 +114,18 @@ class K6Runner:
         with open(template_path, 'r') as f:
             template = f.read()
         
-        # Simple template substitution (in production, use proper templating engine)
-        script = template.replace('{{url}}', config.url)
-        script = script.replace('{{method_lower}}', config.method.lower())
+        # Process dynamic data and variables
+        script_vars = self._process_dynamic_data(config)
+        
+        # Build final URL with query parameters
+        final_url = self._build_url_with_params(config.url, config.query_params)
+        
+        # Basic template substitution (but not URL yet)
+        script = template.replace('{{method_lower}}', config.method.lower())
         script = script.replace('{{virtual_users}}', str(config.virtual_users))
         script = script.replace('{{duration}}', config.duration)
+        script = script.replace('{{timeout}}', config.timeout or '30s')
+        script = script.replace('{{retry_attempts}}', str(config.retry_attempts or 0))
         
         # Handle ramp_up specific variables
         if config.load_pattern == "ramp_up":
@@ -132,37 +139,177 @@ class K6Runner:
             script = script.replace('{{base_users}}', str(base_users))
             script = script.replace('{{spike_users}}', str(spike_users))
         
-        # Handle payload
-        if config.payload:
-            payload_json = json.dumps(config.payload)
-            script = script.replace('{{json payload}}', payload_json)
-            script = script.replace('{{#if payload}}', '')
-            script = script.replace('{{else}}', '/*')
-            script = script.replace('{{/if}}', '*/')
-        else:
-            # Remove payload sections
-            script = script.replace('{{#if payload}}', '/*')
-            script = script.replace('{{else}}', '*/')
-            script = script.replace('{{/if}}', '')
+        # Handle custom headers
+        script = self._process_headers(script, config.headers)
+        
+        # Handle authentication
+        script = self._process_auth(script, config.auth)
+        
+        # Handle cookies
+        script = self._process_cookies(script, config.cookies)
+        
+        # Handle payload (including template processing)
+        script = self._process_payload(script, config, script_vars)
         
         # Handle thresholds
-        if config.thresholds:
-            thresholds_js = []
-            for key, value in config.thresholds.items():
-                thresholds_js.append(f"    '{key}': ['{value}']")
-            thresholds_str = ',\n'.join(thresholds_js)
-            
-            script = script.replace('{{#if thresholds}}', '')
-            script = script.replace('{{#each thresholds}}', '')
-            script = script.replace("    '{{@key}}': ['{{this}}'],", thresholds_str)
-            script = script.replace('{{/each}}', '')
-            script = script.replace('{{/if}}', '')
+        script = self._process_thresholds(script, config.thresholds)
+        
+        # Add environment variables and dynamic data to script
+        script = self._inject_script_variables(script, script_vars, config.env_variables)
+        
+        # Replace URL last to avoid conflicts
+        script = script.replace('{{url}}', final_url)
+        
+        return script
+    
+    def _process_thresholds(self, script: str, thresholds: Optional[Dict[str, str]]) -> str:
+        """Process thresholds in the script."""
+        if not thresholds:
+            script = script.replace('{{thresholds_block}}', '')
+            return script
+        
+        thresholds_js = []
+        for key, value in thresholds.items():
+            thresholds_js.append(f"    '{key}': ['{value}']")
+        thresholds_str = ',\n'.join(thresholds_js)
+        
+        thresholds_block = f"thresholds: {{\n{thresholds_str}\n  }},"
+        script = script.replace('{{thresholds_block}}', thresholds_block)
+        
+        return script
+    
+    def _process_dynamic_data(self, config) -> Dict[str, Any]:
+        """Process dynamic data generators and file data."""
+        script_vars = {}
+        
+        # Generate data from generators config
+        if config.data_generators:
+            generated = DataGenerator.generate_data_from_config(config.data_generators)
+            script_vars.update(generated)
+        
+        # Load data from file
+        if config.data_file:
+            file_data = DataGenerator.process_data_file(config.data_file)
+            if file_data:
+                # For now, use first record or make available as array
+                script_vars['file_data'] = file_data
+                if len(file_data) > 0:
+                    script_vars.update(file_data[0])  # Make first record fields available
+        
+        return script_vars
+    
+    def _build_url_with_params(self, base_url: str, query_params: Optional[Dict[str, str]]) -> str:
+        """Build URL with query parameters."""
+        if not query_params:
+            return base_url
+        
+        separator = '&' if '?' in base_url else '?'
+        query_string = urlencode(query_params)
+        return f"{base_url}{separator}{query_string}"
+    
+    def _process_headers(self, script: str, headers: Optional[Dict[str, str]]) -> str:
+        """Process custom headers in the script."""
+        if not headers:
+            script = script.replace('{{custom_headers_block}}', '')
+            return script
+        
+        headers_js = []
+        for key, value in headers.items():
+            headers_js.append(f"      '{key}': '{value}'")
+        headers_str = ',\n'.join(headers_js)
+        
+        script = script.replace('{{custom_headers_block}}', headers_str + ',')
+        return script
+    
+    def _process_auth(self, script: str, auth: Optional[Dict[str, Any]]) -> str:
+        """Process authentication in the script."""
+        if not auth:
+            script = script.replace('{{auth_header_block}}', '')
+            return script
+        
+        auth_type = auth.get('type', '')
+        auth_header = ''
+        
+        if auth_type == 'bearer':
+            token = auth.get('token', '')
+            auth_header = f"      'Authorization': 'Bearer {token}'"
+        elif auth_type == 'basic':
+            username = auth.get('username', '')
+            password = auth.get('password', '')
+            import base64
+            credentials = base64.b64encode(f"{username}:{password}".encode()).decode()
+            auth_header = f"      'Authorization': 'Basic {credentials}'"
+        elif auth_type == 'apikey':
+            token = auth.get('token', '')
+            header_name = auth.get('header_name', 'X-API-Key')
+            auth_header = f"      '{header_name}': '{token}'"
+        
+        script = script.replace('{{auth_header_block}}', auth_header + ',')
+        return script
+    
+    def _process_cookies(self, script: str, cookies: Optional[Dict[str, str]]) -> str:
+        """Process cookies in the script."""
+        if not cookies:
+            script = script.replace('{{cookies_block}}', '')
+            return script
+        
+        cookie_pairs = [f"{key}={value}" for key, value in cookies.items()]
+        cookie_string = '; '.join(cookie_pairs)
+        
+        cookies_block = f"cookies: {{\n      Cookie: '{cookie_string}'\n    }},"
+        script = script.replace('{{cookies_block}}', cookies_block)
+        return script
+    
+    def _process_payload(self, script: str, config, script_vars: Dict[str, Any]) -> str:
+        """Process payload including template interpolation."""
+        payload_json = '{}'
+        
+        # Use payload_template if provided, otherwise use regular payload
+        if config.payload_template:
+            # Interpolate variables in template
+            payload_str = DataGenerator.interpolate_variables(config.payload_template, script_vars)
+            try:
+                # Try to parse as JSON to validate
+                json.loads(payload_str)
+                payload_json = payload_str
+            except json.JSONDecodeError:
+                logger.warning("Invalid JSON in payload template, using as string")
+                payload_json = json.dumps(payload_str)
+        elif config.payload:
+            payload_json = json.dumps(config.payload)
+        
+        # Generate payload block
+        if config.payload or config.payload_template:
+            payload_block = f"const payload = JSON.stringify({payload_json});\n  const response = http.{config.method.lower()}('{{{{url}}}}', payload, params);"
+            retry_block = f"response = http.{config.method.lower()}('{{{{url}}}}', payload, params);"
         else:
-            # Remove thresholds section
-            script = script.replace('{{#if thresholds}}', '/*')
-            script = script.replace('{{/if}}', '*/')
-            lines = script.split('\n')
-            script = '\n'.join([line for line in lines if '{{#each thresholds}}' not in line and '{{/each}}' not in line and '{{@key}}' not in line])
+            payload_block = f"const response = http.{config.method.lower()}('{{{{url}}}}', params);"
+            retry_block = f"response = http.{config.method.lower()}('{{{{url}}}}', params);"
+        
+        script = script.replace('{{payload_block}}', payload_block)
+        script = script.replace('{{retry_block}}', retry_block)
+        
+        return script
+    
+    def _inject_script_variables(self, script: str, script_vars: Dict[str, Any], env_vars: Optional[Dict[str, str]]) -> str:
+        """Inject environment variables and dynamic data into script."""
+        # Add environment variables setup
+        if env_vars:
+            env_setup = "// Environment variables\n"
+            for key, value in env_vars.items():
+                env_setup += f"const {key} = __ENV.{key} || '{value}';\n"
+            script = env_setup + "\n" + script
+        
+        # Add dynamic variables setup
+        if script_vars:
+            vars_setup = "// Dynamic variables\n"
+            for key, value in script_vars.items():
+                if key != 'file_data':  # Skip complex file_data object
+                    if isinstance(value, str):
+                        vars_setup += f"const {key} = '{value}';\n"
+                    else:
+                        vars_setup += f"const {key} = {json.dumps(value)};\n"
+            script = vars_setup + "\n" + script
         
         return script
     
