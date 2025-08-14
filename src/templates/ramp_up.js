@@ -97,7 +97,7 @@ export default function() {
 }
 
 
-// K6 handleSummary callback - generates basic report formats (no LLM summaries)
+// K6 handleSummary callback - generates only HTML report + console output
 export function handleSummary(data) {
   console.log('📊 Generating K6 ramp-up test reports...');
   
@@ -105,11 +105,10 @@ export function handleSummary(data) {
     const htmlContent = htmlReport(data);
     const textContent = textSummary(data);
     
-    console.log('✅ Basic ramp-up report formats generated successfully');
+    console.log('✅ HTML ramp-up report generated successfully');
     
     return {
       'reports/{{test_id}}_standard_report.html': htmlContent,
-      'reports/{{test_id}}_detailed_summary.json': JSON.stringify(data, null, 2),
       stdout: textContent,
     };
   } catch (error) {

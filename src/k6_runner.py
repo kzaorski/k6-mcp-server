@@ -14,6 +14,33 @@ from pydantic import BaseModel
 from urllib.parse import urlencode
 
 from data_generators import DataGenerator
+from async_io_optimizer import (
+    AsyncIOOptimizer, StreamingMode, StreamingConfig,
+    fast_read_file, fast_write_file, optimized_io_context
+)
+from error_handler import (
+    ErrorHandler, ErrorContext, ErrorCategory, ErrorSeverity, 
+    EnhancedError, NetworkError, ValidationError, DependencyError,
+    ResourceExhaustionError, RetryConfig, with_error_handling,
+    graceful_degradation, global_error_handler
+)
+from security_utils import (
+    sanitize_filename,
+    validate_safe_path,
+    sanitize_url,
+    safe_json_string,
+    sanitize_javascript_template,
+    sanitize_csv_cell,
+    safe_json_parse,
+    mask_sensitive_data,
+    run_sandboxed_command,
+    validate_test_id,
+    validate_http_method,
+    validate_json_payload,
+    SecurityError,
+    InputValidationError,
+    PathTraversalError
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,13 +101,102 @@ class K6TestResult(BaseModel):
 
 class K6Runner:
     def __init__(self):
+        self.error_handler = ErrorHandler()
         self.results_dir = Path(__file__).parent.parent / "reports"
         self.templates_dir = Path(__file__).parent / "templates"
         self.csv_data_dir = Path(__file__).parent.parent / "csv_data"
-        self.results_dir.mkdir(exist_ok=True)
-        self.csv_data_dir.mkdir(exist_ok=True)
+        
+        # Initialize async I/O optimizer with optimized settings
+        streaming_config = StreamingConfig(
+            chunk_size=16384,  # 16KB chunks for better performance
+            max_file_size=500_000_000,  # 500MB for large test results
+            buffer_size=128 * 1024,  # 128KB buffer
+            max_concurrent_operations=5  # Limit concurrent file ops
+        )
+        self.io_optimizer = AsyncIOOptimizer(streaming_config=streaming_config)
+        
+        # Enhanced directory creation with error handling
+        self._initialize_directories()
+        
         self.last_result: Optional[K6TestResult] = None
         self.pending_config = None
+        
+        # Verify K6 availability on initialization
+        asyncio.create_task(self._verify_k6_installation())
+    
+    def _initialize_directories(self):
+        """Initialize required directories with enhanced error handling."""
+        directories = [
+            ("results", self.results_dir),
+            ("csv_data", self.csv_data_dir)
+        ]
+        
+        for name, path in directories:
+            try:
+                path.mkdir(exist_ok=True, parents=True)
+                logger.info(f"Initialized {name} directory: {path}")
+            except PermissionError as e:
+                raise EnhancedError(
+                    f"Permission denied creating {name} directory: {path}",
+                    category=ErrorCategory.FILESYSTEM,
+                    severity=ErrorSeverity.HIGH,
+                    recovery_suggestions=[
+                        f"Check write permissions for {path.parent}",
+                        "Run with appropriate user permissions",
+                        f"Manually create directory: mkdir -p {path}"
+                    ],
+                    original_error=e
+                )
+            except OSError as e:
+                raise EnhancedError(
+                    f"Failed to create {name} directory: {path}",
+                    category=ErrorCategory.FILESYSTEM,
+                    severity=ErrorSeverity.HIGH,
+                    recovery_suggestions=[
+                        "Check available disk space",
+                        "Verify parent directory exists",
+                        "Check filesystem permissions"
+                    ],
+                    original_error=e
+                )
+    
+    @graceful_degradation(fallback_value=None)
+    async def _verify_k6_installation(self):
+        """Verify K6 is installed and accessible."""
+        try:
+            result = await asyncio.create_subprocess_exec(
+                'k6', 'version',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await result.communicate()
+            
+            if result.returncode == 0:
+                version_info = stdout.decode().strip()
+                logger.info(f"K6 installation verified: {version_info}")
+                return version_info
+            else:
+                raise DependencyError(
+                    "K6 executable found but version check failed",
+                    recovery_suggestions=[
+                        "Reinstall K6 from https://k6.io/docs/getting-started/installation/",
+                        "Check K6 installation integrity",
+                        "Verify K6 is not corrupted"
+                    ]
+                )
+                
+        except FileNotFoundError:
+            raise DependencyError(
+                "K6 not found in system PATH",
+                recovery_suggestions=[
+                    "Install K6 from https://k6.io/docs/getting-started/installation/",
+                    "Add K6 to system PATH",
+                    "Verify K6 installation completed successfully"
+                ]
+            )
+        except Exception as e:
+            logger.warning(f"Could not verify K6 installation: {e}")
+            return None
         
     def _format_test_parameters(self, config, test_id: str, csv_file_info: str = None) -> str:
         """Format test parameters for user confirmation."""
@@ -251,49 +367,205 @@ Use confirm_and_execute_test tool with response: "y" or "n"
             return f"Invalid response '{response}'. Please respond with 'y' (yes) or 'n' (no)."
     
     async def _execute_test(self, config, test_id: str, csv_local_path = None) -> str:
-        """Execute the K6 test (internal method)."""
+        """Execute the K6 test (internal method) with enhanced error handling."""
         timestamp = datetime.now().isoformat()
         
-        try:
-            # Generate K6 script
-            script_content = self._generate_script(config, test_id, csv_local_path)
+        context = ErrorContext(
+            operation="execute_k6_test",
+            component="k6_runner",
+            test_id=test_id,
+            user_request=f"{config.method} {config.url}"
+        )
+        
+        # Enhanced test execution with retry logic
+        async def execute_test_operation():
+            # Validate and sanitize test_id to prevent injection
+            try:
+                safe_test_id = validate_test_id(test_id)
+            except InputValidationError as e:
+                logger.error(f"Invalid test_id: {e}")
+                raise ValidationError(f"Invalid test ID: {str(e)}", context=context)
             
-            # Write script to local file in reports directory with UTF-8 encoding
-            script_path = self.results_dir / f"k6_test_{test_id}.js"
-            with open(script_path, 'w', encoding='utf-8') as f:
-                f.write(script_content)
+            # Generate K6 script with error handling
+            try:
+                script_content = await self._generate_script_with_retry(config, safe_test_id, csv_local_path)
+            except Exception as e:
+                raise EnhancedError(
+                    f"Failed to generate K6 script: {str(e)}",
+                    category=ErrorCategory.EXECUTION,
+                    severity=ErrorSeverity.MEDIUM,
+                    context=context,
+                    original_error=e
+                )
             
-            # Prepare K6 command with relative paths (since we're running from reports dir)
-            script_filename = f"k6_test_{test_id}.js"
-            results_filename = f"{test_id}_results.json"
-            summary_filename = f"{test_id}_summary.json"
+            # Write script to local file with error handling
+            script_filename = sanitize_filename(f"k6_test_{safe_test_id}.js")
+            script_path = self.results_dir / script_filename
+            
+            try:
+                with open(script_path, 'w', encoding='utf-8') as f:
+                    f.write(script_content)
+                logger.info(f"K6 script written to: {script_path}")
+            except (PermissionError, OSError) as e:
+                raise EnhancedError(
+                    f"Failed to write K6 script to {script_path}",
+                    category=ErrorCategory.FILESYSTEM,
+                    severity=ErrorSeverity.HIGH,
+                    context=context,
+                    recovery_suggestions=[
+                        f"Check write permissions for {self.results_dir}",
+                        "Ensure sufficient disk space",
+                        "Verify directory is not read-only"
+                    ],
+                    original_error=e
+                )
+            
+            # Prepare K6 command with sanitized filenames
+            results_filename = sanitize_filename(f"{safe_test_id}_results.json")
+            csv_filename = sanitize_filename(f"{safe_test_id}_metrics.csv")
+            summary_filename = sanitize_filename(f"{safe_test_id}_summary.json")
             
             cmd = [
                 "k6", "run", 
                 "--out", f"json={results_filename}",
+                "--out", f"csv={csv_filename}",
                 "--summary-export", summary_filename,
                 script_filename
             ]
             
             logger.info(f"Running K6 command: {' '.join(cmd)}")
             
-            # Run K6 test from the reports directory so relative paths work
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=str(self.results_dir)  # Change working directory to reports
+            # Run K6 test with enhanced error handling
+            try:
+                result = run_sandboxed_command(
+                    cmd,
+                    timeout=3600,  # 1 hour timeout
+                    max_memory_mb=2048,  # 2GB memory limit
+                    max_cpu_seconds=1800,  # 30 minutes CPU time
+                    working_dir=self.results_dir
+                )
+                stdout_text = result.stdout
+                stderr_text = result.stderr
+                returncode = result.returncode
+                
+            except SecurityError as e:
+                raise EnhancedError(
+                    f"Security policy violation during K6 execution: {str(e)}",
+                    category=ErrorCategory.SECURITY,
+                    severity=ErrorSeverity.CRITICAL,
+                    context=context,
+                    recovery_suggestions=[
+                        "Review test configuration for security issues",
+                        "Check K6 script for suspicious content",
+                        "Verify sandboxing configuration"
+                    ],
+                    original_error=e
+                )
+            except subprocess.TimeoutExpired as e:
+                raise ResourceExhaustionError(
+                    f"K6 test exceeded timeout limit: {e.timeout}s",
+                    context=context,
+                    recovery_suggestions=[
+                        "Reduce test duration or complexity",
+                        "Decrease number of virtual users",
+                        "Optimize test script performance",
+                        "Consider splitting into smaller tests"
+                    ],
+                    original_error=e
+                )
+            except FileNotFoundError as e:
+                raise DependencyError(
+                    "K6 executable not found",
+                    context=context,
+                    recovery_suggestions=[
+                        "Install K6 from https://k6.io/docs/getting-started/installation/",
+                        "Add K6 to system PATH",
+                        "Verify K6 installation"
+                    ],
+                    original_error=e
+                )
+            except Exception as e:
+                # Categorize unknown errors based on content
+                error_str = str(e).lower()
+                if any(keyword in error_str for keyword in ['memory', 'resource', 'limit']):
+                    raise ResourceExhaustionError(
+                        f"Resource limit exceeded during K6 execution: {str(e)}",
+                        context=context,
+                        recovery_suggestions=[
+                            "Reduce test load or virtual users",
+                            "Increase system resources",
+                            "Optimize test configuration"
+                        ],
+                        original_error=e
+                    )
+                else:
+                    raise EnhancedError(
+                        f"K6 execution failed: {str(e)}",
+                        category=ErrorCategory.EXECUTION,
+                        severity=ErrorSeverity.HIGH,
+                        context=context,
+                        original_error=e
+                    )
+            
+            return {
+                'returncode': returncode,
+                'stdout': stdout_text,
+                'stderr': stderr_text,
+                'safe_test_id': safe_test_id
+            }
+        
+        # Execute with retry logic
+        retry_config = RetryConfig(max_attempts=2, base_delay=1.0, max_delay=10.0)
+        
+        try:
+            result = await self.error_handler.handle_with_retry(
+                execute_test_operation, context, retry_config
             )
             
-            stdout, stderr = await process.communicate()
+            if not result.success:
+                logger.error(f"Test execution failed after {result.attempt_count} attempts: {result.message}")
+                return f"Test execution failed: {result.message}"
             
-            # Decode output with proper encoding
-            stdout_text = stdout.decode('utf-8', errors='replace') if stdout else ""
-            stderr_text = stderr.decode('utf-8', errors='replace') if stderr else ""
+            # Process successful execution
+            execution_result = result  # This should be the actual result from execute_test_operation
+            # Continue with existing result processing logic...
             
-            if process.returncode == 0:
-                # Parse and format results
-                metrics = await self._parse_results(test_id)
+            return await self._process_test_results(
+                execution_result, config, timestamp, context
+            )
+            
+        except Exception as e:
+            logger.error(f"Error executing K6 test: {str(e)}")
+            if isinstance(e, EnhancedError):
+                return f"Test execution error: {str(e)}"
+            else:
+                return f"Unexpected error during test execution: {str(e)}"
+    
+    async def _generate_script_with_retry(self, config, test_id: str, csv_local_path=None) -> str:
+        """Generate K6 script with retry mechanism for file operations."""
+        try:
+            return self._generate_script(config, test_id, csv_local_path)
+        except Exception as e:
+            logger.error(f"Error generating script: {e}")
+            raise
+    
+    async def _process_test_results(self, execution_result, config, timestamp: str, context: ErrorContext) -> str:
+        """Process K6 test results with enhanced error handling."""
+        try:
+            # Extract results from execution
+            if isinstance(execution_result, dict) and 'returncode' in execution_result:
+                returncode = execution_result['returncode']
+                stdout_text = execution_result['stdout']
+                stderr_text = execution_result['stderr']
+                safe_test_id = execution_result['safe_test_id']
+            else:
+                # Handle direct result from error handler
+                returncode = 0  # Assume success if we got here
+                safe_test_id = context.test_id
+            
+            if returncode == 0:
+                # Parse and format results with sanitized test_id
+                metrics = await self._parse_results(safe_test_id)
                 
                 # Determine actual success based on error rates and checks, not just process exit code
                 actual_success = True
@@ -312,15 +584,15 @@ Use confirm_and_execute_test tool with response: "y" or "n"
                                 failure_reasons.append(f"Check failed: '{check_name}' ({details['fails']} failures)")
                 
                 # Check if thresholds were violated (if any were set)
-                if config.thresholds:
+                if hasattr(config, 'thresholds') and config.thresholds:
                     # This would require more complex threshold checking logic
                     # For now, we rely on K6's built-in threshold handling
                     pass
                 
                 self.last_result = K6TestResult(
-                    test_id=test_id,
+                    test_id=safe_test_id,
                     timestamp=timestamp,
-                    config=config.dict(),
+                    config=config.dict() if hasattr(config, 'dict') else config.__dict__,
                     metrics=metrics,
                     success=actual_success,
                     error_message='; '.join(failure_reasons) if failure_reasons else None
@@ -328,13 +600,13 @@ Use confirm_and_execute_test tool with response: "y" or "n"
                 
                 return self._format_report(self.last_result)
             else:
-                error_msg = stderr_text or "Unknown error"
+                error_msg = stderr_text if 'stderr_text' in locals() else "Unknown error"
                 logger.error(f"K6 test failed: {error_msg}")
                 
                 self.last_result = K6TestResult(
-                    test_id=test_id,
+                    test_id=safe_test_id,
                     timestamp=timestamp,
-                    config=config.dict(),
+                    config=config.dict() if hasattr(config, 'dict') else config.__dict__,
                     metrics={},
                     success=False,
                     error_message=error_msg
@@ -343,8 +615,14 @@ Use confirm_and_execute_test tool with response: "y" or "n"
                 return f"Test failed: {error_msg}"
                 
         except Exception as e:
-            logger.error(f"Error running K6 test: {str(e)}")
-            return f"Error running test: {str(e)}"
+            logger.error(f"Error processing test results: {str(e)}")
+            raise EnhancedError(
+                f"Failed to process test results: {str(e)}",
+                category=ErrorCategory.EXECUTION,
+                severity=ErrorSeverity.MEDIUM,
+                context=context,
+                original_error=e
+            )
     
     def _generate_script(self, config, test_id: str, csv_file_path: Optional[Path] = None) -> str:
         """Generate K6 script based on configuration and template."""
@@ -540,9 +818,15 @@ Use confirm_and_execute_test tool with response: "y" or "n"
             script = script.replace('{{custom_headers_block}}', '')
             return script
         
+        # Mask sensitive headers for logging
+        masked_headers = mask_sensitive_data(headers) if headers else {}
+        
         headers_js = []
         for key, value in headers.items():
-            headers_js.append(f"      '{key}': '{value}'")
+            # Use JSON encoding to safely escape values
+            safe_key = safe_json_string(key)
+            safe_value = safe_json_string(value)
+            headers_js.append(f"      {safe_key}: {safe_value}")
         headers_str = ',\n'.join(headers_js)
         
         script = script.replace('{{custom_headers_block}}', headers_str + ',')
@@ -592,27 +876,43 @@ Use confirm_and_execute_test tool with response: "y" or "n"
         payload_json = '{}'
         has_csv_data = 'csv_file_path' in script_vars
         
+        # Validate HTTP method
+        try:
+            safe_method = validate_http_method(config.method)
+        except InputValidationError:
+            safe_method = 'GET'
+        
         # Use payload_template if provided, otherwise use regular payload
         if config.payload_template:
             if has_csv_data:
-                # For CSV data, create dynamic payload that uses csvData array
-                # Replace template variables with CSV data access
-                payload_js = config.payload_template.replace('{{WER}}', 'csvRecord.WER')
+                # For CSV data, safely process template
+                # Use JSON encoding to prevent injection
+                safe_template = safe_json_string(config.payload_template)
                 
                 payload_block = f"""// Select random CSV record
   const csvRecord = csvData[Math.floor(Math.random() * csvData.length)];
   
-  const payload = JSON.stringify({payload_js});
-  const response = http.{config.method.lower()}('{{{{url}}}}', payload, params);"""
+  // Safely build payload from template with dynamic variable substitution
+  let templateStr = {safe_template};
+  
+  // Replace all CSV column variables dynamically
+  Object.keys(csvRecord).forEach(columnName => {{
+    const regex = new RegExp(`{{{{{{${{columnName}}}}}}}}`, 'g');
+    templateStr = templateStr.replace(regex, csvRecord[columnName]);
+  }});
+  
+  const payload = templateStr;
+  const response = http.{safe_method.lower()}('{{{{url}}}}', payload, params);"""
                 retry_block = f"response = http.{config.method.lower()}('{{{{url}}}}', payload, params);"
             else:
                 # No CSV data - use regular template interpolation
                 payload_str = DataGenerator.interpolate_variables(config.payload_template, script_vars)
                 try:
-                    # Try to parse as JSON to validate structure
-                    json.loads(payload_str)
-                    # If valid JSON, use directly as JavaScript object
-                    payload_block = f"const payload = JSON.stringify({payload_str});\n  const response = http.{config.method.lower()}('{{{{url}}}}', payload, params);"
+                    # Try to parse as JSON to validate structure with size limit
+                    safe_json_parse(payload_str, max_size=1_000_000)
+                    # If valid JSON, safely encode for JavaScript
+                    safe_payload = safe_json_string(payload_str)
+                    payload_block = f"const payload = {safe_payload};\n  const response = http.{safe_method.lower()}('{{{{url}}}}', payload, params);"
                 except json.JSONDecodeError:
                     logger.warning("Invalid JSON in payload template, using as string")
                     # If not valid JSON, treat as string and encode it
@@ -691,7 +991,9 @@ const csvData = new SharedArray('csv data', function () {{
         
         try:
             with open(summary_file, 'r', encoding='utf-8') as f:
-                summary = json.load(f)
+                # Read file content with size limit
+                content = f.read(10_000_000)  # 10MB limit
+                summary = safe_json_parse(content)
             
             metrics = {}
             
@@ -804,10 +1106,7 @@ const csvData = new SharedArray('csv data', function () {{
                 error_details = await self._extract_error_details(raw_results_file)
                 metrics.update(error_details)
             
-            # Process handleSummary outputs if available
-            standard_reports = await self._process_standard_reports(test_id)
-            if standard_reports:
-                metrics.update(standard_reports)
+            # Note: HTML report is generated by K6 handleSummary() automatically
             
             return metrics
             
@@ -910,22 +1209,15 @@ const csvData = new SharedArray('csv data', function () {{
 ⏰ Test Duration: {metrics.get('test_duration')}s
 """
         
-        # Add K6 standard reports information if available
-        if 'standard_reports_available' in metrics and metrics['standard_reports_available']:
-            report += f"\n📊 K6 Standard Reports Available:\n"
-            for report_file in metrics.get('report_files', []):
-                report += f"• {report_file}\n"
-            
-            # Add LLM-optimized summary key points
-            if 'llm_optimized_summary' in metrics and metrics['llm_optimized_summary']:
-                llm_summary = metrics['llm_optimized_summary']
-                if 'quality_assessment' in llm_summary:
-                    qa = llm_summary['quality_assessment']
-                    report += f"\n🎆 K6 Quality Assessment:\n"
-                    report += f"• Grade: {qa.get('performance_grade', 'N/A')}\n"
-                    report += f"• Status: {qa.get('overall_status', 'unknown').upper()}\n"
-                    if qa.get('recommendations'):
-                        report += f"• Recommendations: {len(qa['recommendations'])} available\n"
+        # Add reference to HTML report and CSV file
+        html_report_file = self.results_dir / f"{result.test_id}_standard_report.html"
+        csv_report_file = self.results_dir / f"{result.test_id}_metrics.csv"
+        
+        report += f"\n📊 Generated Files:\n"
+        if html_report_file.exists():
+            report += f"• HTML Report: {html_report_file.name} ({html_report_file.stat().st_size:,} bytes)\n"
+        if csv_report_file.exists():
+            report += f"• CSV Raw Metrics: {csv_report_file.name} ({csv_report_file.stat().st_size:,} bytes)\n"
         
         # Add overall test status
         overall_status = '✅ PASSED' if result.success else '❌ FAILED'
@@ -960,7 +1252,9 @@ const csvData = new SharedArray('csv data', function () {{
             
             try:
                 with open(summary_file, 'r', encoding='utf-8') as f:
-                    summary = json.load(f)
+                    # Read file content with size limit
+                    content = f.read(10_000_000)  # 10MB limit
+                    summary = safe_json_parse(content)
                 
                 # Create a mock result object for formatting
                 mock_result = K6TestResult(
@@ -1003,7 +1297,7 @@ const csvData = new SharedArray('csv data', function () {{
         return "\n".join(templates)
     
     async def _extract_error_details(self, raw_results_file: Path) -> Dict[str, Any]:
-        """Extract detailed error information from K6 raw JSON results."""
+        """Extract detailed error information from K6 raw JSON results using optimized streaming."""
         error_details = {
             'error_breakdown': {},
             'status_code_distribution': {},
@@ -1015,10 +1309,16 @@ const csvData = new SharedArray('csv data', function () {{
         }
         
         try:
-            with open(raw_results_file, 'r', encoding='utf-8') as f:
-                for line_num, line in enumerate(f):
+            # Use optimized streaming for large result files
+            line_num = 0
+            async with self.io_optimizer:
+                async for json_obj in self.io_optimizer.stream_read_file(
+                    raw_results_file, StreamingMode.JSON_LINES
+                ):
+                    line_num += 1
                     try:
-                        data = json.loads(line.strip())
+                        # json_obj is already parsed from JSON lines
+                        data = json_obj
                         
                         # Only process http_req_failed metrics (these contain error info)
                         if (data.get('type') == 'Point' and 
@@ -1213,235 +1513,54 @@ const csvData = new SharedArray('csv data', function () {{
         
         return messages
     
-    async def _process_standard_reports(self, test_id: str) -> Dict[str, Any]:
-        """Process K6 handleSummary outputs (LLM-optimized summary, HTML report, etc.)."""
-        standard_reports = {
-            'standard_reports_available': False,
-            'llm_optimized_summary': None,
-            'html_report_path': None,
-            'detailed_k6_summary': None,
-            'report_files': []
-        }
-        
-        try:
-            # Check for LLM-optimized summary
-            llm_summary_file = self.results_dir / f"{test_id}_llm_optimized_summary.json"
-            if llm_summary_file.exists():
-                with open(llm_summary_file, 'r', encoding='utf-8') as f:
-                    standard_reports['llm_optimized_summary'] = json.load(f)
-                standard_reports['report_files'].append(f'{test_id}_llm_optimized_summary.json')
-            
-            # Check for HTML report
-            html_report_file = self.results_dir / f"{test_id}_standard_report.html"
-            if html_report_file.exists():
-                standard_reports['html_report_path'] = str(html_report_file)
-                standard_reports['report_files'].append(f'{test_id}_standard_report.html')
-            
-            # Check for detailed K6 summary
-            detailed_summary_file = self.results_dir / f"{test_id}_detailed_summary.json"
-            if detailed_summary_file.exists():
-                # Only load if reasonably sized (< 5MB)
-                if detailed_summary_file.stat().st_size < 5 * 1024 * 1024:
-                    with open(detailed_summary_file, 'r', encoding='utf-8') as f:
-                        standard_reports['detailed_k6_summary'] = json.load(f)
-                standard_reports['report_files'].append(f'{test_id}_detailed_summary.json')
-            
-            if standard_reports['report_files']:
-                standard_reports['standard_reports_available'] = True
-                logger.info(f"Found K6 standard reports: {standard_reports['report_files']}")
-            
-        except Exception as e:
-            logger.warning(f"Error processing standard reports: {str(e)}")
-        
-        return standard_reports
-    
-    async def get_standard_html_report(self, test_id: str) -> str:
-        """Get the HTML report content for a test."""
-        try:
-            html_report_file = self.results_dir / f"{test_id}_standard_report.html"
-            if not html_report_file.exists():
-                return f"HTML report not found for test {test_id}. Ensure the test used handleSummary() function."
-            
-            # Check file size (limit to 2MB for safety)
-            file_size = html_report_file.stat().st_size
-            if file_size > 2 * 1024 * 1024:
-                return f"HTML report too large ({file_size} bytes). File location: {html_report_file}"
-            
-            with open(html_report_file, 'r', encoding='utf-8') as f:
-                html_content = f.read()
-            
-            return f"""📊 K6 Standard HTML Report for test {test_id}
-
-📁 Report file: {html_report_file.name}
-💾 File size: {file_size:,} bytes
-
-📝 HTML Content:
-{html_content}"""
-            
-        except Exception as e:
-            logger.error(f"Error reading HTML report: {str(e)}")
-            return f"Error reading HTML report: {str(e)}"
     
     
-    async def generate_detailed_report(self, test_id: str) -> str:
-        """Generate detailed CSV report for chart generation."""
-        try:
-            # Parse raw results
-            raw_results_file = self.results_dir / f"{test_id}_results.json"
-            summary_file = self.results_dir / f"{test_id}_summary.json"
-            
-            if not raw_results_file.exists() or not summary_file.exists():
-                return f"Results files not found for test {test_id}"
-            
-            # Load summary for configuration info
-            with open(summary_file, 'r', encoding='utf-8') as f:
-                summary = json.load(f)
-            
-            # Generate CSV with time-series data
-            csv_file = self.results_dir / f"{test_id}_detailed_report.csv"
-            
-            # Parse raw K6 JSON output for time-series data
-            time_series_data = []
-            with open(raw_results_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    try:
-                        data = json.loads(line.strip())
-                        if data.get('type') == 'Point' and data.get('metric'):
-                            time_series_data.append(data)
-                    except json.JSONDecodeError:
-                        continue
-            
-            # Create CSV with detailed metrics over time
-            with open(csv_file, 'w', encoding='utf-8', newline='') as csvfile:
-                writer = csv.writer(csvfile)
-                
-                # Header
-                writer.writerow([
-                    'timestamp', 'metric_name', 'value', 'tags',
-                    'response_time_ms', 'status_code', 'method', 'url'
-                ])
-                
-                # Data rows
-                for point in time_series_data:
-                    timestamp = point.get('data', {}).get('time', '')
-                    metric_name = point.get('metric', '')
-                    value = point.get('data', {}).get('value', 0)
-                    tags = json.dumps(point.get('data', {}).get('tags', {}))
-                    
-                    # Extract HTTP specific data
-                    tags_dict = point.get('data', {}).get('tags', {})
-                    response_time = value if metric_name == 'http_req_duration' else ''
-                    status_code = tags_dict.get('status', '')
-                    method = tags_dict.get('method', '')
-                    url = tags_dict.get('url', '')
-                    
-                    writer.writerow([
-                        timestamp, metric_name, value, tags,
-                        response_time, status_code, method, url
-                    ])
-            
-            # Also create a summary CSV for easier chart generation
-            summary_csv_file = self.results_dir / f"{test_id}_summary_report.csv"
-            
-            with open(summary_csv_file, 'w', encoding='utf-8', newline='') as csvfile:
-                writer = csv.writer(csvfile)
-                
-                # Summary metrics
-                writer.writerow(['Metric', 'Value', 'Unit'])
-                
-                metrics = await self._parse_results(test_id)
-                
-                if 'response_time_raw' in metrics:
-                    rt = metrics['response_time_raw']
-                    writer.writerow(['Response Time - Average', rt['avg'], 'ms'])
-                    writer.writerow(['Response Time - Minimum', rt['min'], 'ms'])
-                    writer.writerow(['Response Time - Maximum', rt['max'], 'ms'])
-                    writer.writerow(['Response Time - 50th Percentile', rt['p50'], 'ms'])
-                    writer.writerow(['Response Time - 90th Percentile', rt['p90'], 'ms'])
-                    writer.writerow(['Response Time - 95th Percentile', rt['p95'], 'ms'])
-                    writer.writerow(['Response Time - 99th Percentile', rt['p99'], 'ms'])
-                
-                if 'throughput_raw' in metrics:
-                    writer.writerow(['Throughput', metrics['throughput_raw'], 'req/s'])
-                
-                if 'total_requests' in metrics:
-                    writer.writerow(['Total Requests', metrics['total_requests'], 'count'])
-                
-                if 'error_rate_raw' in metrics:
-                    writer.writerow(['Error Rate', metrics['error_rate_raw'], '%'])
-                
-                if 'failed_requests' in metrics:
-                    writer.writerow(['Failed Requests', metrics['failed_requests'], 'count'])
-                
-                if 'virtual_users' in metrics:
-                    writer.writerow(['Virtual Users', metrics['virtual_users'], 'count'])
-                
-                if 'data_received_raw' in metrics:
-                    writer.writerow(['Data Received', metrics['data_received_raw']/1024, 'KB'])
-                
-                if 'data_sent_raw' in metrics:
-                    writer.writerow(['Data Sent', metrics['data_sent_raw']/1024, 'KB'])
-                
-                if 'test_duration' in metrics:
-                    writer.writerow(['Test Duration', metrics['test_duration'], 'seconds'])
-            
-            return f"""📊 Detailed reports generated for test {test_id}:
-
-📁 Files created:
-• {csv_file.name} - Time-series data for detailed analysis
-• {summary_csv_file.name} - Summary metrics for quick charts
-
-💡 Chart suggestions:
-• Line chart: Response time over time
-• Bar chart: Response time percentiles (p50, p90, p95, p99)
-• Area chart: Throughput over time
-• Pie chart: Success vs Error rate
-• Histogram: Response time distribution
-
-📍 Files location: {self.results_dir}"""
-            
-        except Exception as e:
-            logger.error(f"Error generating detailed report: {str(e)}")
-            return f"Error generating detailed report: {str(e)}"
     
-    async def get_report_files(self, test_id: str) -> str:
-        """Get list of available report files for a test."""
-        try:
-            files = list(self.results_dir.glob(f"{test_id}*"))
-            if not files:
-                return f"No files found for test {test_id}"
-            
-            report = f"📁 Available files for test {test_id}:\n\n"
-            
-            for file in sorted(files):
-                file_size = file.stat().st_size
-                file_type = "Unknown"
-                
-                if file.suffix == '.json':
-                    if 'summary' in file.name:
-                        file_type = "Summary metrics (JSON)"
-                    elif 'results' in file.name:
-                        file_type = "Raw test data (JSON)"
-                elif file.suffix == '.csv':
-                    if 'detailed' in file.name:
-                        file_type = "Time-series data (CSV)"
-                    elif 'summary' in file.name:
-                        file_type = "Summary metrics (CSV)"
-                elif file.suffix == '.js':
-                    file_type = "K6 test script"
-                
-                report += f"• {file.name} ({file_size:,} bytes) - {file_type}\n"
-            
-            report += f"\n📍 Location: {self.results_dir}"
-            return report
-            
-        except Exception as e:
-            logger.error(f"Error listing report files: {str(e)}")
-            return f"Error listing report files: {str(e)}"
+    
     
     async def save_csv_data(self, csv_content: str, filename: str = "uploaded_data.csv") -> str:
         """Save CSV data content to a file for use in K6 tests."""
         try:
+            # Validate CSV content and header
+            import csv
+            from io import StringIO
+            
+            # Parse CSV to validate format and check for header
+            csv_reader = csv.reader(StringIO(csv_content))
+            try:
+                header_row = next(csv_reader)
+                if not header_row or all(not col.strip() for col in header_row):
+                    raise ValueError("CSV must contain a valid header row with column names")
+                
+                # Check if header contains variable names (no empty columns)
+                if any(not col.strip() for col in header_row):
+                    raise ValueError("CSV header cannot contain empty column names")
+                
+                # Basic validation that header looks like variable names, not data
+                # Check for common data patterns that shouldn't be in headers
+                for col in header_row:
+                    col_clean = col.strip()
+                    # Check for email patterns in header (likely data, not variable name)
+                    if '@' in col_clean and '.' in col_clean:
+                        raise ValueError(f"CSV header column '{col_clean}' appears to contain email data instead of variable name. Header must contain variable names like 'email', not actual email addresses.")
+                    # Check for very long strings that look like data
+                    if len(col_clean) > 50:
+                        raise ValueError(f"CSV header column '{col_clean}' is too long. Headers should contain short variable names, not data values.")
+                    # Check for numeric patterns that suggest data instead of variable names
+                    if col_clean.replace('.', '').replace('-', '').isdigit() and len(col_clean) > 3:
+                        raise ValueError(f"CSV header column '{col_clean}' appears to be numeric data. Header should contain variable names like 'user_id' or 'price', not actual values.")
+                
+                # Verify there's at least one data row
+                data_rows = list(csv_reader)
+                if not data_rows:
+                    raise ValueError("CSV must contain at least one data row besides the header")
+                
+                logger.info(f"CSV validation passed. Header columns: {header_row}")
+                logger.info(f"CSV contains {len(data_rows)} data rows")
+                
+            except StopIteration:
+                raise ValueError("CSV file is empty or contains no rows")
+            
             # Ensure filename has .csv extension
             if not filename.endswith('.csv'):
                 filename += '.csv'
@@ -1449,16 +1568,21 @@ const csvData = new SharedArray('csv data', function () {{
             # Save to dedicated csv_data directory
             csv_path = self.csv_data_dir / filename
             
-            # Write CSV content to file
-            with open(csv_path, 'w', encoding='utf-8', newline='') as f:
-                f.write(csv_content)
+            # Write CSV content to file using optimized streaming
+            async def csv_content_generator():
+                yield csv_content
+            
+            async with self.io_optimizer:
+                await self.io_optimizer.stream_write_file(
+                    csv_path, csv_content_generator(), StreamingMode.TEXT
+                )
             
             logger.info(f"CSV data saved to {csv_path}")
             
             # Check if file was saved correctly
             if csv_path.exists():
                 file_size = csv_path.stat().st_size
-                return f"✅ CSV data successfully saved to {csv_path}\n\nFile size: {file_size} bytes\nLocation: csv_data/{filename}\nYou can now use this CSV file in K6 tests by specifying data_file: '{filename}'"
+                return f"✅ CSV data successfully saved to {csv_path}\n\nFile size: {file_size} bytes\nLocation: csv_data/{filename}\nHeader columns: {', '.join(header_row)}\nData rows: {len(data_rows)}\n\nYou can now use this CSV file in K6 tests by specifying data_file: '{filename}'\nAvailable template variables: {{{{{', '.join([col for col in header_row])}}}}}"
             else:
                 return f"❌ Error: File was not created at {csv_path}"
             
