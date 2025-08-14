@@ -121,8 +121,13 @@ class K6Runner:
         self.last_result: Optional[K6TestResult] = None
         self.pending_config = None
         
-        # Verify K6 availability on initialization
-        asyncio.create_task(self._verify_k6_installation())
+        # Verify K6 availability on initialization (defer if no event loop)
+        self._k6_verified = False
+        try:
+            asyncio.create_task(self._verify_k6_installation())
+        except RuntimeError:
+            # No event loop, will verify later when needed
+            pass
     
     def _initialize_directories(self):
         """Initialize required directories with enhanced error handling."""

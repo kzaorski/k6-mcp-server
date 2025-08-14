@@ -74,17 +74,21 @@ class AsyncIOOptimizer:
         
         # Connection pool management
         self._session: Optional[aiohttp.ClientSession] = None
-        self._session_lock = asyncio.Lock()
+        self._session_lock = None  # Will be initialized when event loop is available
         
         # Thread pool for CPU-intensive operations
-        self._thread_pool = ThreadPoolExecutor(
-            max_workers=min(32, (asyncio.current_task().get_loop().get_debug() and 1) or 4)
-        )
+        try:
+            # Try to get current loop if available
+            loop = asyncio.get_running_loop()
+            max_workers = min(32, (loop.get_debug() and 1) or 4)
+        except RuntimeError:
+            # No running loop, use default
+            max_workers = 4
         
-        # Semaphore for limiting concurrent operations
-        self._operation_semaphore = asyncio.Semaphore(
-            self.streaming_config.max_concurrent_operations
-        )
+        self._thread_pool = ThreadPoolExecutor(max_workers=max_workers)
+        
+        # Semaphore for limiting concurrent operations - will be initialized when needed
+        self._operation_semaphore = None
         
         # Metrics tracking
         self._metrics = {
@@ -105,8 +109,18 @@ class AsyncIOOptimizer:
         """Async context manager exit."""
         await self.close()
     
+    def _ensure_async_components(self):
+        """Initialize async components when event loop is available."""
+        if self._session_lock is None:
+            self._session_lock = asyncio.Lock()
+        if self._operation_semaphore is None:
+            self._operation_semaphore = asyncio.Semaphore(
+                self.streaming_config.max_concurrent_operations
+            )
+    
     async def _ensure_session(self):
         """Ensure HTTP session is initialized."""
+        self._ensure_async_components()
         if self._session is None:
             async with self._session_lock:
                 if self._session is None:
