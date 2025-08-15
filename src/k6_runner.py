@@ -120,6 +120,7 @@ class K6Runner:
         
         self.last_result: Optional[K6TestResult] = None
         self.pending_config = None
+        self.confirmed_config = None
         
         # Verify K6 availability on initialization (defer if no event loop)
         self._k6_verified = False
@@ -274,16 +275,105 @@ Advanced:
 
 🚨 TEST NOT EXECUTED YET - CONFIRMATION REQUIRED 🚨
 
-PLEASE CONFIRM: Do you want to run this test?
-Use confirm_and_execute_test tool with response: "y" or "n"
+**INTERACTIVE CONFIRMATION REQUIRED**
 
-⚠️  The test will NOT run until you confirm with "y"
+Options:
+1. **Interactive**: Use `confirm_test_interactive` tool (recommended)
+2. **Direct**: Use `confirm_test` tool with "y" or "n", then `execute_confirmed_test`
+
+⚠️  The test will NOT run until you explicitly confirm
+🔒 Default response is "n" (cancel) for safety
 """
         return params
 
+    async def preview_single_test_config(self, config) -> str:
+        """
+        Preview what a K6 single test configuration will look like without preparing it for execution.
+        Shows detailed information about the test setup, load pattern, and expected behavior.
+        """
+        try:
+            # Generate preview information
+            preview = f"""🔍 K6 Single Test Preview
+{'='*50}
+
+📋 Test Configuration:
+• URL: {config.url}
+• Method: {config.method}
+• Load Pattern: {config.load_pattern}
+• Virtual Users: {config.virtual_users}"""
+
+            # Add execution mode details
+            if config.iterations:
+                preview += f"\n• Execution Mode: Iterations ({config.iterations} total requests)"
+                estimated_duration = (config.iterations / config.virtual_users) * (config.think_time or 1.0)
+                preview += f"\n• Estimated Duration: ~{estimated_duration:.1f}s"
+            else:
+                preview += f"\n• Execution Mode: Duration ({config.duration})"
+                preview += f"\n• Total Requests: Depends on response times and think time"
+
+            # Add request details
+            preview += f"\n\n📤 Request Details:"
+            if config.payload:
+                preview += f"\n• Payload: {len(str(config.payload))} characters"
+                preview += f"\n• Content-Type: application/json"
+            else:
+                preview += f"\n• Payload: None (GET request)"
+
+            if config.headers:
+                preview += f"\n• Custom Headers: {len(config.headers)} headers"
+            
+            if config.auth_header:
+                preview += f"\n• Authentication: Bearer token provided"
+            elif config.basic_auth:
+                preview += f"\n• Authentication: Basic auth (username: {config.basic_auth.get('username', 'N/A')})"
+
+            # Add load pattern specifics
+            preview += f"\n\n🚀 Load Pattern Details:"
+            if config.load_pattern == "constant":
+                preview += f"\n• Type: Constant load"
+                preview += f"\n• Strategy: {config.virtual_users} concurrent users"
+            elif config.load_pattern == "ramp_up":
+                preview += f"\n• Type: Ramp-up load"
+                preview += f"\n• Strategy: Gradual increase to {config.virtual_users} users"
+            elif config.load_pattern == "spike":
+                spike_users = config.virtual_users * 3  # Typical spike multiplier
+                preview += f"\n• Type: Spike test"
+                preview += f"\n• Strategy: Sudden spike to {spike_users} users, then back to {config.virtual_users}"
+
+            # Add thresholds and checks
+            if config.thresholds:
+                preview += f"\n\n✅ Performance Thresholds:"
+                for name, threshold in config.thresholds.items():
+                    preview += f"\n• {name}: {threshold}"
+            else:
+                preview += f"\n\n✅ Performance Thresholds: Default K6 thresholds"
+
+            # Add file information
+            if config.data_file:
+                preview += f"\n\n📁 Data File:"
+                preview += f"\n• File: {config.data_file}"
+                preview += f"\n• Usage: CSV data for parameterized testing"
+
+            # Add output information
+            preview += f"\n\n📊 Expected Output:"
+            preview += f"\n• JSON Results: Detailed metrics and statistics"
+            preview += f"\n• Console Summary: Real-time progress and final results"
+            preview += f"\n• Test ID Format: k6_single_<timestamp>"
+
+            preview += f"\n\n🎯 Next Steps:"
+            preview += f"\n• Use 'run_k6_single_test' to prepare this test for execution"
+            preview += f"\n• The test will require confirmation before running"
+            preview += f"\n• Results will be saved to the reports/ directory"
+
+            return preview
+
+        except Exception as e:
+            logger.error(f"Error generating test preview: {str(e)}")
+            return f"Error generating test preview: {str(e)}"
+
     async def prepare_test(self, config) -> str:
         """Prepare a K6 test configuration and show parameters for confirmation. Does NOT execute the test."""
-        test_id = f"test_{int(time.time())}"
+        test_id = f"k6_single_{int(time.time())}"
         timestamp = datetime.now().isoformat()
         
         try:
@@ -345,31 +435,48 @@ Use confirm_and_execute_test tool with response: "y" or "n"
             logger.error(f"Error preparing test: {str(e)}")
             return f"Error preparing test: {str(e)}"
     
-    async def confirm_test_execution(self, response: str) -> str:
-        """Handle test confirmation response."""
+    async def confirm_test(self, response: str = "n") -> str:
+        """Handle test confirmation response - ONLY confirms, does not execute."""
         if not self.pending_config:
             return "No pending test to confirm. Please run run_k6_test first."
         
+        # Default to "n" for safety if no response provided
+        response = response or "n"
         response_lower = response.lower()
         if response_lower in ['y', 'yes']:
-            # Execute the pending test
-            config = self.pending_config['config']
-            test_id = self.pending_config['test_id']
-            csv_local_path = self.pending_config['csv_local_path']
-            
-            # Clear pending config
+            # Move to confirmed state, but don't execute yet
+            self.confirmed_config = self.pending_config
             self.pending_config = None
             
-            # Execute test
-            return await self._execute_test(config, test_id, csv_local_path)
+            return f"✅ Test confirmed and ready for execution.\n\nUse execute_confirmed_test tool to run the test:\n• Test ID: {self.confirmed_config['test_id']}\n• URL: {self.confirmed_config['config'].url}\n• Method: {self.confirmed_config['config'].method}"
         
         elif response_lower in ['n', 'no']:
             # Cancel test
             self.pending_config = None
-            return "Test execution cancelled by user."
+            return "❌ Test execution cancelled by user. (Default: cancel for safety)"
         
         else:
             return f"Invalid response '{response}'. Please respond with 'y' (yes) or 'n' (no)."
+    
+    def is_confirmed(self) -> bool:
+        """Check if there's a confirmed test ready for execution."""
+        return self.confirmed_config is not None
+    
+    async def execute_confirmed_test(self) -> str:
+        """Execute the previously confirmed test."""
+        if not self.confirmed_config:
+            return "No confirmed test ready for execution. Use confirm_test first."
+        
+        # Execute the confirmed test
+        config = self.confirmed_config['config']
+        test_id = self.confirmed_config['test_id']
+        csv_local_path = self.confirmed_config['csv_local_path']
+        
+        # Clear confirmed config
+        self.confirmed_config = None
+        
+        # Execute test
+        return await self._execute_test(config, test_id, csv_local_path)
     
     async def _execute_test(self, config, test_id: str, csv_local_path = None) -> str:
         """Execute the K6 test (internal method) with enhanced error handling."""
@@ -426,9 +533,9 @@ Use confirm_and_execute_test tool with response: "y" or "n"
                 )
             
             # Prepare K6 command with sanitized filenames
-            results_filename = sanitize_filename(f"{safe_test_id}_results.json")
-            csv_filename = sanitize_filename(f"{safe_test_id}_metrics.csv")
-            summary_filename = sanitize_filename(f"{safe_test_id}_summary.json")
+            results_filename = sanitize_filename(f"test_{safe_test_id}_results.json")
+            csv_filename = sanitize_filename(f"test_{safe_test_id}_metrics.csv")
+            summary_filename = sanitize_filename(f"test_{safe_test_id}_summary.json")
             
             cmd = [
                 "k6", "run", 
@@ -437,6 +544,14 @@ Use confirm_and_execute_test tool with response: "y" or "n"
                 "--summary-export", summary_filename,
                 script_filename
             ]
+            
+            # Add K6 Web Dashboard environment variables
+            env = {
+                **os.environ,
+                "K6_WEB_DASHBOARD": "true",
+                "K6_WEB_DASHBOARD_EXPORT": f"html-report_{safe_test_id}.html",
+                "K6_WEB_DASHBOARD_PERIOD": "1s"
+            }
             
             logger.info(f"Running K6 command: {' '.join(cmd)}")
             
@@ -447,7 +562,8 @@ Use confirm_and_execute_test tool with response: "y" or "n"
                     timeout=3600,  # 1 hour timeout
                     max_memory_mb=2048,  # 2GB memory limit
                     max_cpu_seconds=1800,  # 30 minutes CPU time
-                    working_dir=self.results_dir
+                    working_dir=self.results_dir,
+                    env=env
                 )
                 stdout_text = result.stdout
                 stderr_text = result.stderr
@@ -634,7 +750,8 @@ Use confirm_and_execute_test tool with response: "y" or "n"
         template_map = {
             "constant": "constant_load.js",
             "ramp_up": "ramp_up.js", 
-            "spike": "spike.js"
+            "spike": "spike.js",
+            "custom_stages": "custom_stages.js"
         }
         
         template_name = template_map.get(config.load_pattern, "constant_load.js")
@@ -671,6 +788,11 @@ Use confirm_and_execute_test tool with response: "y" or "n"
             spike_users = config.virtual_users * 3
             script = script.replace('{{base_users}}', str(base_users))
             script = script.replace('{{spike_users}}', str(spike_users))
+        
+        # Handle custom_stages specific variables
+        if config.load_pattern == "custom_stages":
+            stages_config = self._generate_stages_config(config)
+            script = script.replace('{{stages_config}}', stages_config)
         
         # Handle custom headers
         script = self._process_headers(script, config.headers)
@@ -710,6 +832,39 @@ Use confirm_and_execute_test tool with response: "y" or "n"
         script = script.replace('{{url}}', final_url)
         
         return script
+    
+    def _generate_stages_config(self, config) -> str:
+        """Generate stages configuration for custom_stages pattern."""
+        try:
+            if hasattr(config, 'stages') and config.stages:
+                # Convert stages list to JavaScript array format
+                stages = []
+                for stage in config.stages:
+                    if isinstance(stage, dict) and 'duration' in stage and 'target' in stage:
+                        duration = stage['duration']
+                        target = stage['target']
+                        stages.append(f"{{ duration: '{duration}', target: {target} }}")
+                    else:
+                        logger.warning(f"Invalid stage format: {stage}, skipping")
+                
+                if stages:
+                    stages_js = "[\n    " + ",\n    ".join(stages) + "\n  ]"
+                    logger.info(f"Generated custom stages config: {stages_js}")
+                    return stages_js
+                else:
+                    logger.warning("No valid stages found, using default single stage")
+            
+            # Fallback to default single stage if no stages or invalid format
+            duration = getattr(config, 'duration', '60s')
+            virtual_users = getattr(config, 'virtual_users', 1)
+            default_stages = f"[{{ duration: '{duration}', target: {virtual_users} }}]"
+            logger.info(f"Using default stages config: {default_stages}")
+            return default_stages
+            
+        except Exception as e:
+            logger.error(f"Error generating stages config: {e}")
+            # Emergency fallback
+            return "[{ duration: '60s', target: 1 }]"
     
     def _process_request_logging(self, script: str, log_requests: bool) -> str:
         """Process request logging configuration."""
@@ -917,20 +1072,20 @@ Use confirm_and_execute_test tool with response: "y" or "n"
                     safe_json_parse(payload_str, max_size=1_000_000)
                     # If valid JSON, safely encode for JavaScript
                     safe_payload = safe_json_string(payload_str)
-                    payload_block = f"const payload = {safe_payload};\n  const response = http.{safe_method.lower()}('{{{{url}}}}', payload, params);"
+                    payload_block = f"const payload = {safe_payload};\n  let response = http.{safe_method.lower()}('{{{{url}}}}', payload, params);"
                 except json.JSONDecodeError:
                     logger.warning("Invalid JSON in payload template, using as string")
                     # If not valid JSON, treat as string and encode it
                     payload_json = json.dumps(payload_str)
-                    payload_block = f"const payload = JSON.stringify({payload_json});\n  const response = http.{config.method.lower()}('{{{{url}}}}', payload, params);"
+                    payload_block = f"const payload = JSON.stringify({payload_json});\n  let response = http.{config.method.lower()}('{{{{url}}}}', payload, params);"
                 
                 retry_block = f"response = http.{config.method.lower()}('{{{{url}}}}', payload, params);"
         elif config.payload:
             payload_json = json.dumps(config.payload)
-            payload_block = f"const payload = JSON.stringify({payload_json});\n  const response = http.{config.method.lower()}('{{{{url}}}}', payload, params);"
+            payload_block = f"const payload = JSON.stringify({payload_json});\n  let response = http.{config.method.lower()}('{{{{url}}}}', payload, params);"
             retry_block = f"response = http.{config.method.lower()}('{{{{url}}}}', payload, params);"
         else:
-            payload_block = f"const response = http.{config.method.lower()}('{{{{url}}}}', params);"
+            payload_block = f"let response = http.{config.method.lower()}('{{{{url}}}}', params);"
             retry_block = f"response = http.{config.method.lower()}('{{{{url}}}}', params);"
         
         script = script.replace('{{payload_block}}', payload_block)
@@ -989,7 +1144,7 @@ const csvData = new SharedArray('csv data', function () {{
     
     async def _parse_results(self, test_id: str) -> Dict[str, Any]:
         """Parse K6 results from JSON files."""
-        summary_file = self.results_dir / f"{test_id}_summary.json"
+        summary_file = self.results_dir / f"test_{test_id}_summary.json"
         
         if not summary_file.exists():
             return {}
@@ -1039,14 +1194,29 @@ const csvData = new SharedArray('csv data', function () {{
                 # HTTP request failed rate
                 if 'http_req_failed' in metrics_data:
                     failed = metrics_data['http_req_failed']
-                    # K6 uses 'value' for the failure rate (0.0-1.0), not 'rate'
-                    error_rate = failed.get('value', 0)
-                    metrics['error_rate'] = f"{error_rate*100:.2f}%"
-                    metrics['error_rate_raw'] = error_rate * 100
-                    # For failed request count, we need to calculate from total requests
-                    total_requests = metrics_data.get('http_reqs', {}).get('count', 0)
-                    metrics['failed_requests'] = int(total_requests * error_rate)
-                    metrics['success_requests'] = total_requests - metrics['failed_requests']
+                    
+                    # K6's http_req_failed metric structure:
+                    # - "value": the actual failure rate (0.0 = 0% failed, 1.0 = 100% failed)
+                    # - For failed requests: "passes" = requests that didn't fail, "fails" = requests that failed
+                    # - But the "value" field contains the definitive failure rate
+                    
+                    # Use the direct failure rate value from K6
+                    error_rate_decimal = failed.get('value', 0.0)  # This is 0.0-1.0
+                    
+                    metrics['error_rate'] = f"{error_rate_decimal*100:.2f}%"
+                    metrics['error_rate_raw'] = error_rate_decimal * 100
+                    
+                    # Calculate request counts from total requests and error rate
+                    total_requests = metrics.get('total_requests', 0)
+                    if total_requests > 0:
+                        failed_count = int(total_requests * error_rate_decimal)
+                        success_count = total_requests - failed_count
+                    else:
+                        failed_count = 0
+                        success_count = 0
+                    
+                    metrics['failed_requests'] = failed_count
+                    metrics['success_requests'] = success_count
                 
                 # Virtual users
                 if 'vus' in metrics_data:
@@ -1106,12 +1276,12 @@ const csvData = new SharedArray('csv data', function () {{
                     }
             
             # Extract detailed error information from raw results
-            raw_results_file = self.results_dir / f"{test_id}_results.json"
+            raw_results_file = self.results_dir / f"test_{test_id}_results.json"
             if raw_results_file.exists():
                 error_details = await self._extract_error_details(raw_results_file)
                 metrics.update(error_details)
             
-            # Note: HTML report is generated by K6 handleSummary() automatically
+            # Note: JSON results are generated by K6 handleSummary() automatically
             
             return metrics
             
@@ -1214,15 +1384,20 @@ const csvData = new SharedArray('csv data', function () {{
 ⏰ Test Duration: {metrics.get('test_duration')}s
 """
         
-        # Add reference to HTML report and CSV file
-        html_report_file = self.results_dir / f"{result.test_id}_standard_report.html"
-        csv_report_file = self.results_dir / f"{result.test_id}_metrics.csv"
+        # Add reference to JSON result files
+        summary_file = self.results_dir / f"test_{result.test_id}_summary.json"
+        results_file = self.results_dir / f"test_{result.test_id}_results.json"
+        html_report_file = self.results_dir / f"html-report_{result.test_id}.html"
         
         report += f"\n📊 Generated Files:\n"
+        if summary_file.exists():
+            report += f"• JSON Summary: {summary_file.name} ({summary_file.stat().st_size:,} bytes)\n"
+        if results_file.exists():
+            report += f"• JSON Results: {results_file.name} ({results_file.stat().st_size:,} bytes)\n"
         if html_report_file.exists():
-            report += f"• HTML Report: {html_report_file.name} ({html_report_file.stat().st_size:,} bytes)\n"
-        if csv_report_file.exists():
-            report += f"• CSV Raw Metrics: {csv_report_file.name} ({csv_report_file.stat().st_size:,} bytes)\n"
+            report += f"• 🌐 HTML Dashboard: {html_report_file.name} ({html_report_file.stat().st_size:,} bytes) - Open in browser for visual analysis\n"
+        else:
+            report += f"• ⚠️ HTML Dashboard: Not generated (test may be too short < 3 seconds for K6 Web Dashboard)\n"
         
         # Add overall test status
         overall_status = '✅ PASSED' if result.success else '❌ FAILED'
@@ -1236,12 +1411,11 @@ const csvData = new SharedArray('csv data', function () {{
 🕐 Timestamp: {result.timestamp}
 """
         
-        # Add reference to safety instructions for failed tests
+        # Add reminder for failed tests
         if not result.success:
             report += f"""
 
 🚨 CRITICAL: This test failed and requires careful interpretation
-📋 Please consult the AI Safety Instructions (available as MCP resource: file://AI_SAFETY_CRITICAL.md)
 ⚠️  Remember: Failed tests measure real system performance, not test configuration issues
 """
         
@@ -1251,7 +1425,7 @@ const csvData = new SharedArray('csv data', function () {{
         """Get test results for a specific test or the last test."""
         if test_id:
             # Load specific test results
-            summary_file = self.results_dir / f"{test_id}_summary.json"
+            summary_file = self.results_dir / f"test_{test_id}_summary.json"
             if not summary_file.exists():
                 return f"No results found for test ID: {test_id}"
             
@@ -1296,7 +1470,13 @@ const csvData = new SharedArray('csv data', function () {{
             "   • Sudden traffic spikes", 
             "   • Tests system resilience under stress",
             "",
-            "💡 Use these patterns with the 'load_pattern' parameter in run_k6_test"
+            "4. 🎯 custom_stages - Custom load stages",
+            "   • Define multiple stages with different VU targets",
+            "   • Example: 1min→1user, 2min→2users, 3min→10users",
+            "   • Perfect for complex load scenarios",
+            "",
+            "💡 Use these patterns with the 'load_pattern' parameter in run_k6_test",
+            "💡 For custom_stages, use run_k6_custom_stages_test with 'stages' parameter"
         ]
         
         return "\n".join(templates)

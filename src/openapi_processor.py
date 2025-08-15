@@ -21,7 +21,7 @@ from openapi_models import (
     HttpMethod, ParameterLocation, TestGenerationOptions, TestScenario,
     OpenAPIParameter, SecuritySchemeType, EndpointSelector
 )
-from multi_request_models import K6MultiRequestConfig, RequestStep
+from multi_request_models import K6WorkflowConfig, RequestStep, K6MultiRequestConfig  # K6MultiRequestConfig for backward compatibility
 from security_utils import (
     safe_json_parse, sanitize_url, validate_safe_path,
     InputValidationError, SecurityError
@@ -394,7 +394,7 @@ class OpenAPIProcessor:
         return suggestions
 
     def generate_single_endpoint_tests(self, analysis: APIAnalysis, 
-                                     options: TestGenerationOptions) -> List[K6MultiRequestConfig]:
+                                     options: TestGenerationOptions) -> List[K6WorkflowConfig]:
         """Generate individual tests for each endpoint."""
         tests = []
         
@@ -411,7 +411,7 @@ class OpenAPIProcessor:
         return tests
 
     def _create_single_endpoint_test(self, endpoint: EndpointAnalysis, spec: OpenAPISpec,
-                                   options: TestGenerationOptions) -> Optional[K6MultiRequestConfig]:
+                                   options: TestGenerationOptions) -> Optional[K6WorkflowConfig]:
         """Create a test configuration for a single endpoint."""
         base_url = spec.get_base_url()
         
@@ -449,7 +449,7 @@ class OpenAPIProcessor:
         workflow_name = f"{endpoint.method.value}_{endpoint.path.replace('/', '_').replace('{', '').replace('}', '')}_test"
         description = f"Single endpoint test for {endpoint.method.value} {endpoint.path}"
         
-        return K6MultiRequestConfig(
+        return K6WorkflowConfig(
             workflow_name=workflow_name,
             description=description,
             virtual_users=options.virtual_users,
@@ -458,7 +458,7 @@ class OpenAPIProcessor:
         )
 
     def generate_workflow_test(self, analysis: APIAnalysis, scenario: TestScenario,
-                             options: TestGenerationOptions) -> Optional[K6MultiRequestConfig]:
+                             options: TestGenerationOptions) -> Optional[K6WorkflowConfig]:
         """Generate a workflow test from a test scenario."""
         steps = []
         base_url = analysis.spec.get_base_url()
@@ -484,7 +484,7 @@ class OpenAPIProcessor:
             logger.warning(f"No steps generated for scenario: {scenario.name}")
             return None
         
-        return K6MultiRequestConfig(
+        return K6WorkflowConfig(
             workflow_name=scenario.name.replace(' ', '_').lower(),
             description=scenario.description,
             virtual_users=options.virtual_users,
@@ -759,7 +759,7 @@ class OpenAPIProcessor:
         return filtered
 
     def generate_selective_tests(self, analysis: APIAnalysis, 
-                                options: TestGenerationOptions) -> List[K6MultiRequestConfig]:
+                                options: TestGenerationOptions) -> List[K6WorkflowConfig]:
         """
         Generate tests for selected endpoints only.
         
@@ -822,7 +822,7 @@ class OpenAPIProcessor:
 
     def _generate_selective_crud_workflow(self, analysis: APIAnalysis, resource: str,
                                         endpoints: List[EndpointAnalysis], 
-                                        options: TestGenerationOptions) -> Optional[K6MultiRequestConfig]:
+                                        options: TestGenerationOptions) -> Optional[K6WorkflowConfig]:
         """Generate a CRUD workflow for selected endpoints of a resource."""
         # Sort endpoints by logical CRUD order: POST (create), GET (read), PUT (update), DELETE (delete)
         method_priority = {'POST': 1, 'GET': 2, 'PUT': 3, 'PATCH': 3, 'DELETE': 4}
@@ -890,7 +890,7 @@ class OpenAPIProcessor:
         if not workflow_steps:
             return None
         
-        return K6MultiRequestConfig(
+        return K6WorkflowConfig(
             workflow_name=f"{resource}_selective_crud_workflow",
             description=f"Selective CRUD workflow for {resource} resource with chosen endpoints",
             virtual_users=options.virtual_users,

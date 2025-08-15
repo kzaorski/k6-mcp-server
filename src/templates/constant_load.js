@@ -1,56 +1,6 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { Trend, Counter } from 'k6/metrics';
-// External report libraries - may fail due to network issues
-// import { htmlReport } from 'https://raw.githubusercontent.com/benc-uk/k6-reporter/main/dist/bundle.js';
-// import { textSummary } from 'https://jslib.k6.io/k6-summary/0.0.1/index.js';
-
-// Fallback simple HTML report generator
-function htmlReport(data) {
-  const metrics = data.metrics || {};
-  const duration = metrics.http_req_duration?.values || {};
-  const reqs = metrics.http_reqs?.values || {};
-  const failed = metrics.http_req_failed?.values || {};
-  
-  const totalRequests = reqs.count || 0;
-  const failedRequests = Math.round(totalRequests * (failed.rate || 0));
-  
-  return `<!DOCTYPE html>
-<html>
-<head><title>K6 Test Report</title></head>
-<body>
-<h1>K6 Performance Test Report</h1>
-<h2>Summary</h2>
-<ul>
-<li>Total Requests: ${totalRequests}</li>
-<li>Failed Requests: ${failedRequests}</li>
-<li>Average Response Time: ${Math.round(duration.avg || 0)}ms</li>
-<li>95th Percentile: ${Math.round(duration['p(95)'] || 0)}ms</li>
-</ul>
-<h2>Generated: ${new Date().toISOString()}</h2>
-</body>
-</html>`;
-}
-
-// Fallback text summary
-function textSummary(data) {
-  const metrics = data.metrics || {};
-  const duration = metrics.http_req_duration?.values || {};
-  const reqs = metrics.http_reqs?.values || {};
-  const failed = metrics.http_req_failed?.values || {};
-  
-  const totalRequests = reqs.count || 0;
-  const successRate = Math.round((1 - (failed.rate || 0)) * 100);
-  
-  return `
-K6 Test Results:
-================
-• Total Requests: ${totalRequests}
-• Avg Response Time: ${Math.round(duration.avg || 0)}ms
-• P95 Response Time: ${Math.round(duration['p(95)'] || 0)}ms
-• Success Rate: ${successRate}%
-`;
-}
 
 // Custom metrics for detailed analysis
 const responseTimeTrend = new Trend('custom_response_time');
@@ -101,22 +51,20 @@ export default function() {
 }
 
 
-// K6 handleSummary callback - generates only HTML report + console output
+// K6 handleSummary callback - generates only JSON output
 export function handleSummary(data) {
-  console.log('📊 Generating K6 reports...');
+  console.log('📊 Generating K6 results...');
   
   try {
-    const htmlContent = htmlReport(data);
-    const textContent = textSummary(data);
-    
-    console.log('✅ HTML report generated successfully');
+    console.log('✅ JSON results generated successfully');
     
     return {
-      // HTML report only
-      'reports/{{test_id}}_standard_report.html': htmlContent,
+      // JSON files that MCP server expects
+      'test_{{test_id}}_summary.json': JSON.stringify(data, null, 2),
+      'test_{{test_id}}_results.json': JSON.stringify(data, null, 2),
       
-      // Console output
-      stdout: textContent,
+      // Console output with basic summary
+      stdout: `K6 Test completed. Results saved to JSON files and HTML dashboard (html-report_{{test_id}}.html).`,
     };
   } catch (error) {
     console.error('❌ Error in handleSummary():', error.message);
@@ -125,7 +73,7 @@ export function handleSummary(data) {
     // Return minimal safe output
     return {
       'reports/{{test_id}}_error_log.txt': `Error in handleSummary(): ${error.message}\nStack: ${error.stack}\nData keys: ${Object.keys(data).join(', ')}`,
-      stdout: `Error generating reports: ${error.message}`,
+      stdout: `Error generating results: ${error.message}`,
     };
   }
 }

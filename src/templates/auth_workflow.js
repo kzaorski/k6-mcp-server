@@ -8,38 +8,6 @@ const tokenExtractionCounter = new Counter('auth_token_extractions');
 const authFailureCounter = new Counter('auth_failures');
 const protectedResourceCounter = new Counter('auth_protected_access');
 
-// Fallback HTML report for auth workflows
-function authHtmlReport(data) {
-  const metrics = data.metrics || {};
-  const loginDuration = metrics.auth_login_duration?.values || {};
-  const tokenExtractions = metrics.auth_token_extractions?.values || {};
-  const authFailures = metrics.auth_failures?.values || {};
-  
-  return `<!DOCTYPE html>
-<html>
-<head>
-  <title>K6 Authentication Workflow Report</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 20px; }
-    .header { background: #e8f4f8; padding: 15px; border-radius: 5px; border-left: 4px solid #007acc; }
-    .auth-step { margin: 15px 0; padding: 15px; border-radius: 5px; }
-    .login-step { background: #fff3cd; border-left: 4px solid #ffc107; }
-    .token-step { background: #d4edda; border-left: 4px solid #28a745; }
-    .protected-step { background: #cce5ff; border-left: 4px solid #007bff; }
-    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0; }
-    .metric-box { padding: 15px; background: #f8f9fa; border-radius: 8px; text-align: center; }
-    .metric-value { font-size: 24px; font-weight: bold; color: #007acc; }
-  </style>
-</head>
-<body>
-  <div class="header">
-    <h1>🔐 Authentication Workflow Report</h1>
-    <p><strong>Workflow:</strong> {{workflow_name}}</p>
-    <p><strong>Generated:</strong> ${new Date().toISOString()}</p>
-  </div>
-  
-  <div class="metrics">
-    <div class="metric-box">
       <h3>🔑 Login Success Rate</h3>
       <div class="metric-value">${Math.round(((tokenExtractions.count || 0) / Math.max(1, (tokenExtractions.count || 0) + (authFailures.count || 0))) * 100)}%</div>
     </div>
@@ -74,34 +42,6 @@ function authHtmlReport(data) {
 </html>`;
 }
 
-// Specialized auth workflow text summary
-function authTextSummary(data) {
-  const metrics = data.metrics || {};
-  const loginDuration = metrics.auth_login_duration?.values || {};
-  const tokenExtractions = metrics.auth_token_extractions?.values || {};
-  const authFailures = metrics.auth_failures?.values || {};
-  const protectedAccess = metrics.auth_protected_access?.values || {};
-  
-  const loginSuccessRate = Math.round(((tokenExtractions.count || 0) / Math.max(1, (tokenExtractions.count || 0) + (authFailures.count || 0))) * 100);
-  
-  return `
-🔐 K6 Authentication Workflow Results:
-=====================================
-Workflow: {{workflow_name}}
-Authentication Type: {{auth_type}}
-
-📊 Authentication Metrics:
-• Login Success Rate: ${loginSuccessRate}%
-• Avg Login Time: ${Math.round(loginDuration.avg || 0)}ms
-• Tokens Extracted: ${tokenExtractions.count || 0}
-• Authentication Failures: ${authFailures.count || 0}
-• Protected Resource Access: ${protectedAccess.count || 0}
-
-🔒 Security Validation:
-• Token Format Validation: ${tokenExtractions.count > 0 ? 'PASSED' : 'FAILED'}
-• Session Management: {{share_cookies}}
-• Auth Header Propagation: ENABLED
-`;
 }
 
 export const options = {
@@ -554,8 +494,6 @@ export function handleSummary(data) {
   console.log('📊 Generating authentication workflow reports...');
   
   try {
-    const htmlContent = authHtmlReport(data);
-    const textContent = authTextSummary(data);
     
     // Enhanced auth workflow summary
     const authWorkflowSummary = {
@@ -575,17 +513,15 @@ export function handleSummary(data) {
     console.log('✅ Authentication workflow reports generated successfully');
     
     return {
-      // Professional HTML report for auth workflow
-      'reports/{{test_id}}_auth_workflow_report.html': htmlContent,
       
       // Authentication workflow summary
-      'reports/{{test_id}}_auth_summary.json': JSON.stringify(authWorkflowSummary, null, 2),
+      'test_{{test_id}}_auth_summary.json': JSON.stringify(authWorkflowSummary, null, 2),
       
       // Complete raw K6 data
-      'reports/{{test_id}}_detailed_summary.json': JSON.stringify(data, null, 2),
+      'test_{{test_id}}_detailed_summary.json': JSON.stringify(data, null, 2),
       
-      // Enhanced console output
-      stdout: textContent + `\n\nAuthentication Steps:\n${stepResults.map(r => 
+      // Basic console output with authentication step summary
+      stdout: `K6 Authentication Workflow completed. Results saved to JSON files and HTML dashboard (html-report_{{test_id}}.html).\n\nAuthentication Steps:\n${stepResults.map(r => 
         `${r.success ? '✅' : '❌'} ${r.name}: ${r.status} (${r.duration}ms)`
       ).join('\n')}`,
     };

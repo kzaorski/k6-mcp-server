@@ -141,8 +141,9 @@ class AsyncIOOptimizer:
                     self._session = aiohttp.ClientSession(
                         connector=connector,
                         timeout=timeout,
-                        headers={'User-Agent': 'K6-MCP-Server/1.0'},
-                        compress=self.connection_config.enable_compression
+                        headers={'User-Agent': 'K6-MCP-Server/1.0'}
+                        # Note: compress parameter removed in newer aiohttp versions
+                        # Compression is now handled automatically by the connector
                     )
     
     async def close(self):

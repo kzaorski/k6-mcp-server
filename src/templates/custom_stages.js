@@ -8,11 +8,7 @@ const errorCounter = new Counter('custom_errors');
 const successCounter = new Counter('custom_success');
 
 export const options = {
-  stages: [
-    { duration: '{{ramp_duration}}', target: {{virtual_users}} },
-    { duration: '{{duration}}', target: {{virtual_users}} },
-    { duration: '30s', target: 0 },
-  ],
+  stages: {{stages_config}},
   {{thresholds_block}}
 };
 
@@ -56,7 +52,7 @@ export default function() {
 
 // K6 handleSummary callback - generates only JSON output
 export function handleSummary(data) {
-  console.log('📊 Generating K6 ramp-up test results...');
+  console.log('📊 Generating K6 custom stages test results...');
   
   try {
     console.log('✅ JSON results generated successfully');
@@ -67,15 +63,15 @@ export function handleSummary(data) {
       'test_{{test_id}}_results.json': JSON.stringify(data, null, 2),
       
       // Console output with basic summary
-      stdout: `K6 Ramp-up Test completed. Results saved to JSON files and HTML dashboard (html-report_{{test_id}}.html).`,
+      stdout: `K6 Custom Stages Test completed. Results saved to JSON files and HTML dashboard (html-report_{{test_id}}.html).`,
     };
   } catch (error) {
-    console.error('❌ Error in ramp-up handleSummary():', error.message);
+    console.error('❌ Error in custom stages handleSummary():', error.message);
     console.error('Stack:', error.stack);
     
     return {
       'reports/{{test_id}}_error_log.txt': `Error in handleSummary(): ${error.message}\nStack: ${error.stack}\nData keys: ${Object.keys(data).join(', ')}`,
-      stdout: `Error generating ramp-up results: ${error.message}`,
+      stdout: `Error generating custom stages results: ${error.message}`,
     };
   }
 }

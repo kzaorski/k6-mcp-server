@@ -2,91 +2,6 @@ import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { Trend, Counter } from 'k6/metrics';
 
-// External report libraries - fallback to simple implementations
-// import { htmlReport } from 'https://raw.githubusercontent.com/benc-uk/k6-reporter/main/dist/bundle.js';
-// import { textSummary } from 'https://jslib.k6.io/k6-summary/0.0.1/index.js';
-
-// Fallback simple HTML report generator for multi-request workflows
-function htmlReport(data) {
-  const metrics = data.metrics || {};
-  const duration = metrics.http_req_duration?.values || {};
-  const reqs = metrics.http_reqs?.values || {};
-  const failed = metrics.http_req_failed?.values || {};
-  
-  const totalRequests = reqs.count || 0;
-  const failedRequests = Math.round(totalRequests * (failed.rate || 0));
-  
-  return `<!DOCTYPE html>
-<html>
-<head>
-  <title>K6 Multi-Request Workflow Report</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 20px; }
-    .header { background: #f5f5f5; padding: 15px; border-radius: 5px; }
-    .step { margin: 10px 0; padding: 10px; border-left: 3px solid #007acc; }
-    .success { border-left-color: #28a745; }
-    .failed { border-left-color: #dc3545; }
-    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin: 20px 0; }
-    .metric-box { padding: 10px; background: #f8f9fa; border-radius: 5px; }
-  </style>
-</head>
-<body>
-  <div class="header">
-    <h1>K6 Multi-Request Workflow Report</h1>
-    <p>Workflow: {{workflow_name}}</p>
-    <p>Generated: ${new Date().toISOString()}</p>
-  </div>
-  
-  <div class="metrics">
-    <div class="metric-box">
-      <h3>Total Requests</h3>
-      <p>${totalRequests}</p>
-    </div>
-    <div class="metric-box">
-      <h3>Failed Requests</h3>
-      <p>${failedRequests}</p>
-    </div>
-    <div class="metric-box">
-      <h3>Average Response Time</h3>
-      <p>${Math.round(duration.avg || 0)}ms</p>
-    </div>
-    <div class="metric-box">
-      <h3>95th Percentile</h3>
-      <p>${Math.round(duration['p(95)'] || 0)}ms</p>
-    </div>
-  </div>
-
-  <h2>Step Results</h2>
-  <div id="steps">
-    <!-- Step results will be populated by K6 script -->
-  </div>
-</body>
-</html>`;
-}
-
-// Fallback text summary for workflows
-function textSummary(data) {
-  const metrics = data.metrics || {};
-  const duration = metrics.http_req_duration?.values || {};
-  const reqs = metrics.http_reqs?.values || {};
-  const failed = metrics.http_req_failed?.values || {};
-  
-  const totalRequests = reqs.count || 0;
-  const successRate = Math.round((1 - (failed.rate || 0)) * 100);
-  
-  return `
-K6 Multi-Request Workflow Results:
-=================================
-Workflow: {{workflow_name}}
-• Total Requests: ${totalRequests}
-• Avg Response Time: ${Math.round(duration.avg || 0)}ms
-• P95 Response Time: ${Math.round(duration['p(95)'] || 0)}ms
-• Success Rate: ${successRate}%
-• Execution Mode: {{execution_mode}}
-• Stop on Failure: {{stop_on_failure}}
-`;
-}
-
 // Custom metrics for per-step analysis
 const stepResponseTimes = new Trend('step_response_times');
 const stepErrorCounter = new Counter('step_errors');
@@ -603,14 +518,11 @@ export default function() {
   }
 }
 
-// K6 handleSummary callback - generates multi-request workflow reports
+// K6 handleSummary callback - generates JSON workflow results
 export function handleSummary(data) {
-  console.log('📊 Generating K6 multi-request workflow reports...');
+  console.log('📊 Generating K6 multi-request workflow results...');
   
   try {
-    const htmlContent = htmlReport(data);
-    const textContent = textSummary(data);
-    
     // Enhanced summary with step results
     const workflowSummary = {
       workflow_name: workflowConfig.name,
@@ -626,20 +538,17 @@ export function handleSummary(data) {
       generated_at: new Date().toISOString()
     };
     
-    console.log('✅ Multi-request workflow reports generated successfully');
+    console.log('✅ Multi-request workflow JSON results generated successfully');
     
     return {
-      // Professional HTML report
-      'reports/{{test_id}}_workflow_report.html': htmlContent,
-      
       // Complete workflow summary with step details
-      'reports/{{test_id}}_workflow_summary.json': JSON.stringify(workflowSummary, null, 2),
+      'test_{{test_id}}_workflow_summary.json': JSON.stringify(workflowSummary, null, 2),
       
       // Complete raw K6 data
-      'reports/{{test_id}}_detailed_summary.json': JSON.stringify(data, null, 2),
+      'test_{{test_id}}_detailed_summary.json': JSON.stringify(data, null, 2),
       
-      // Enhanced console output
-      stdout: textContent + `\n\nWorkflow Steps Summary:\n${stepResults.map(r => 
+      // Basic console output with step summary
+      stdout: `K6 Multi-Request Workflow completed. Results saved to JSON files and HTML dashboard (html-report_{{test_id}}.html).\n\nWorkflow Steps Summary:\n${stepResults.map(r => 
         `${r.success ? '✅' : '❌'} ${r.name} (${r.step_id}): ${r.status} - ${r.duration}ms`
       ).join('\n')}`,
     };
@@ -647,8 +556,8 @@ export function handleSummary(data) {
     console.error('❌ Error in workflow handleSummary():', error.message);
     
     return {
-      'reports/{{test_id}}_workflow_error.txt': `Error in workflow handleSummary(): ${error.message}\nWorkflow: {{workflow_name}}\nSteps: ${workflowSteps.length}`,
-      stdout: `Error generating workflow reports: ${error.message}`,
+      'test_{{test_id}}_workflow_error.txt': `Error in workflow handleSummary(): ${error.message}\nWorkflow: {{workflow_name}}\nSteps: ${workflowSteps.length}`,
+      stdout: `Error generating workflow results: ${error.message}`,
     };
   }
 }

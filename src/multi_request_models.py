@@ -78,7 +78,7 @@ class RequestStep(BaseModel):
         return v
 
 
-class WorkflowResult(BaseModel):
+class K6WorkflowResult(BaseModel):
     """Results from executing a multi-request workflow."""
     workflow_name: str
     test_id: str
@@ -117,7 +117,7 @@ class StepResult(BaseModel):
     condition_result: Optional[bool] = None
 
 
-class K6MultiRequestConfig(BaseModel):
+class K6WorkflowConfig(BaseModel):
     """
     Configuration for a multi-request K6 workflow test.
     
@@ -276,7 +276,7 @@ class WorkflowTemplate(BaseModel):
     category: str  # "auth", "crud", "ecommerce", "custom"
     
     # Template configuration with placeholders
-    base_config: K6MultiRequestConfig
+    base_config: K6WorkflowConfig
     
     # Configuration parameters that can be customized
     parameters: Dict[str, Dict[str, Any]]  # {"base_url": {"type": "string", "required": True}}
@@ -295,7 +295,7 @@ WORKFLOW_TEMPLATES = {
         template_name="OAuth Login Flow",
         description="Standard OAuth login with token extraction and protected resource access",
         category="auth",
-        base_config=K6MultiRequestConfig(
+        base_config=K6WorkflowConfig(
             workflow_name="oauth_login_flow",
             description="OAuth authentication flow with token extraction",
             virtual_users=1,
@@ -340,7 +340,7 @@ WORKFLOW_TEMPLATES = {
         template_name="CRUD Operations",
         description="Complete Create, Read, Update, Delete operation sequence",
         category="crud",
-        base_config=K6MultiRequestConfig(
+        base_config=K6WorkflowConfig(
             workflow_name="crud_operations",
             description="Full CRUD operations test",
             virtual_users=1,
@@ -408,7 +408,7 @@ def list_workflow_templates() -> List[str]:
 def create_workflow_from_template(
     template_name: str, 
     parameters: Dict[str, Any]
-) -> K6MultiRequestConfig:
+) -> K6WorkflowConfig:
     """
     Create a workflow configuration from a template with provided parameters.
     
@@ -417,7 +417,7 @@ def create_workflow_from_template(
         parameters: Parameter values to substitute in the template
         
     Returns:
-        Configured K6MultiRequestConfig instance
+        Configured K6WorkflowConfig instance
         
     Raises:
         ValueError: If template not found or required parameters missing
@@ -438,4 +438,9 @@ def create_workflow_from_template(
     # This would involve recursively walking the config and replacing template variables
     # For now, return the base config (implementation would be added in template_engine.py)
     
-    return K6MultiRequestConfig(**config_dict)
+    return K6WorkflowConfig(**config_dict)
+
+
+# Backward compatibility aliases
+K6MultiRequestConfig = K6WorkflowConfig  # TODO: Remove in future version
+WorkflowResult = K6WorkflowResult  # TODO: Remove in future version

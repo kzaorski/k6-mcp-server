@@ -12,6 +12,7 @@ import secrets
 import subprocess
 import platform
 from pathlib import Path
+from typing import List, Dict, Any, Optional
 
 # Import resource module only on Unix systems
 try:
@@ -359,12 +360,56 @@ def mask_sensitive_data(data: Dict[str, Any], sensitive_keys: List[str] = None) 
     return masked_data
 
 
+def _get_safe_environment() -> Dict[str, str]:
+    """Get a safe environment for subprocess execution that works cross-platform."""
+    import platform
+    import os
+    
+    # Base safe environment
+    safe_env = {
+        'LANG': 'C.UTF-8' if platform.system() != 'Windows' else 'en_US',
+    }
+    
+    # Platform-specific PATH handling
+    if platform.system() == 'Windows':
+        # On Windows, preserve system PATH but sanitize it
+        system_path = os.environ.get('PATH', '')
+        # Keep Windows system paths and add common tool locations
+        safe_paths = [
+            r'C:\Windows\system32',
+            r'C:\Windows',
+            r'C:\Windows\System32\Wbem',
+            r'C:\Windows\System32\WindowsPowerShell\v1.0',
+        ]
+        
+        # Add existing PATH but filter out suspicious entries
+        for path in system_path.split(';'):
+            path = path.strip()
+            if path and not any(suspicious in path.lower() for suspicious in ['temp', 'tmp', 'appdata']):
+                safe_paths.append(path)
+        
+        safe_env['PATH'] = ';'.join(safe_paths)
+        safe_env['SYSTEMROOT'] = os.environ.get('SYSTEMROOT', r'C:\Windows')
+        safe_env['TEMP'] = os.environ.get('TEMP', r'C:\Windows\Temp')
+        safe_env['TMP'] = os.environ.get('TMP', r'C:\Windows\Temp')
+        
+    else:
+        # Linux/Unix
+        safe_env.update({
+            'PATH': '/usr/local/bin:/usr/bin:/bin',
+            'HOME': '/tmp'
+        })
+    
+    return safe_env
+
+
 def run_sandboxed_command(
     cmd: List[str],
     timeout: int = 3600,
     max_memory_mb: int = 2048,
     max_cpu_seconds: int = 1800,
-    working_dir: Optional[Path] = None
+    working_dir: Optional[Path] = None,
+    env: Optional[Dict[str, str]] = None
 ) -> subprocess.CompletedProcess:
     """
     Run command with resource limits and sandboxing.
@@ -375,6 +420,7 @@ def run_sandboxed_command(
         max_memory_mb: Maximum memory in megabytes
         max_cpu_seconds: Maximum CPU time in seconds
         working_dir: Working directory for command
+        env: Optional environment variables to add to the safe environment
     
     Returns:
         Completed process result
@@ -413,6 +459,12 @@ def run_sandboxed_command(
                 logger.warning(f"Potentially dangerous character in command argument: {arg}")
             safe_cmd.append(arg)
         
+        # Prepare environment
+        safe_env = _get_safe_environment()
+        if env:
+            # Merge provided environment variables with safe environment
+            safe_env.update(env)
+        
         # Run with limits
         result = subprocess.run(
             safe_cmd,
@@ -422,11 +474,7 @@ def run_sandboxed_command(
             check=False,
             cwd=working_dir,
             preexec_fn=limit_resources if RESOURCE_AVAILABLE and hasattr(resource, 'setrlimit') else None,
-            env={
-                'PATH': '/usr/local/bin:/usr/bin:/bin',
-                'LANG': 'C.UTF-8',
-                'HOME': '/tmp'
-            }
+            env=safe_env
         )
         
         return result

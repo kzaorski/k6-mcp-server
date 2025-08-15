@@ -541,9 +541,9 @@ export default function() {
   }
 }
 
-// HAR workflow summary handler
+// HAR workflow summary handler - JSON results only
 export function handleSummary(data) {
-  console.log('📊 Generating HAR workflow test report...');
+  console.log('📊 Generating HAR workflow test results...');
   
   const harWorkflowSummary = {
     workflow_name: harWorkflowConfig.name,
@@ -567,91 +567,9 @@ export function handleSummary(data) {
     generated_at: new Date().toISOString()
   };
   
-  const htmlReport = `<!DOCTYPE html>
-<html>
-<head>
-  <title>HAR Workflow Test Report</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-    .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-    .header { background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%); color: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; }
-    .step { margin: 15px 0; padding: 20px; border-radius: 8px; border-left: 5px solid #ccc; }
-    .success { background: #d4edda; border-left-color: #28a745; }
-    .failed { background: #f8d7da; border-left-color: #dc3545; }
-    .variables { background: #fff3cd; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 5px solid #ffc107; }
-    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0; }
-    .metric-box { background: #f8f9fa; padding: 15px; border-radius: 8px; text-align: center; border: 1px solid #e9ecef; }
-    .metric-value { font-size: 24px; font-weight: bold; color: #495057; }
-    .static-info { background: #e3f2fd; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 5px solid #2196f3; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="header">
-      <h1>🔄 HAR Workflow Test Report</h1>
-      <p><strong>Workflow:</strong> ${harWorkflowSummary.workflow_name}</p>
-      <p><strong>Type:</strong> ${harWorkflowSummary.workflow_type}</p>
-      <p>Generated: ${harWorkflowSummary.generated_at}</p>
-    </div>
-    
-    <div class="metrics">
-      <div class="metric-box">
-        <h3>Total Steps</h3>
-        <div class="metric-value">${harWorkflowSummary.total_steps}</div>
-      </div>
-      <div class="metric-box">
-        <h3>Success Rate</h3>
-        <div class="metric-value">${harStepResults.filter(r => r.success).length}/${harStepResults.length}</div>
-      </div>
-      <div class="metric-box">
-        <h3>Total Requests</h3>
-        <div class="metric-value">${harWorkflowSummary.overall_metrics.total_requests}</div>
-      </div>
-      <div class="metric-box">
-        <h3>Avg Response Time</h3>
-        <div class="metric-value">${Math.round(harWorkflowSummary.overall_metrics.avg_response_time)}ms</div>
-      </div>
-    </div>
-    
-    ${staticFilesConfig.enabled ? `
-    <div class="static-info">
-      <h3>🎨 Static Files Configuration</h3>
-      <p><strong>Load Pattern:</strong> ${staticFilesConfig.loadPattern}</p>
-      <p><strong>Parallel Loading:</strong> ${staticFilesConfig.parallelLoading ? 'Yes' : 'No'}</p>
-      ${harWorkflowSummary.static_files_metrics ? `
-      <p><strong>Static Files Processed:</strong> ${harWorkflowSummary.static_files_metrics.total_static_requests}</p>
-      <p><strong>Avg Static Response Time:</strong> ${Math.round(harWorkflowSummary.static_files_metrics.avg_static_response_time)}ms</p>
-      ` : ''}
-    </div>
-    ` : ''}
-    
-    <div class="variables">
-      <h3>🔧 Extracted Variables</h3>
-      ${Object.entries(harGlobalContext.extractedVariables).map(([key, value]) => {
-        const displayValue = String(value).length > 50 ? String(value).substring(0, 50) + '...' : value;
-        return `<p><strong>${key}:</strong> ${displayValue}</p>`;
-      }).join('')}
-    </div>
-    
-    <h2>📋 HAR Steps Results</h2>
-    ${harStepResults.map((step, index) => `
-      <div class="step ${step.success ? 'success' : 'failed'}">
-        <h3>${step.success ? '✅' : '❌'} Step ${index + 1}: ${step.name}</h3>
-        <p><strong>Step ID:</strong> ${step.step_id}</p>
-        <p><strong>Status:</strong> ${step.status}</p>
-        <p><strong>Duration:</strong> ${step.duration}ms</p>
-        ${step.url ? `<p><strong>URL:</strong> ${step.url}</p>` : ''}
-        ${step.error ? `<p><strong>Error:</strong> ${step.error}</p>` : ''}
-        ${step.extracted_variables && Object.keys(step.extracted_variables).length > 0 ? 
-          `<p><strong>Variables Extracted:</strong> ${Object.keys(step.extracted_variables).join(', ')}</p>` : ''}
-      </div>
-    `).join('')}
-  </div>
-</body>
-</html>`;
+  console.log('✅ HAR workflow JSON results generated successfully');
   
   return {
-    [`har_workflow_${harWorkflowConfig.name}_report.html`]: htmlReport,
     [`har_workflow_${harWorkflowConfig.name}_summary.json`]: JSON.stringify(harWorkflowSummary, null, 2),
     stdout: `
 🔄 HAR Workflow Test Results: ${harWorkflowConfig.name}
@@ -680,6 +598,10 @@ ${Object.entries(harGlobalContext.extractedVariables).map(([key, value]) => {
 ${harStepResults.map(r => 
   `${r.success ? '✅' : '❌'} ${r.name}: ${r.status} (${r.duration}ms)`
 ).join('\\n')}
+
+📊 Generated Files:
+• HAR Workflow Summary: har_workflow_${harWorkflowConfig.name}_summary.json
+• 🌐 HTML Dashboard: html-report_{{test_id}}.html - Open in browser for visual analysis
 `,
   };
 }

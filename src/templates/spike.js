@@ -1,49 +1,6 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { Trend, Counter } from 'k6/metrics';
-// External report libraries - may fail due to network issues
-// import { htmlReport } from 'https://raw.githubusercontent.com/benc-uk/k6-reporter/main/dist/bundle.js';
-// import { textSummary } from 'https://jslib.k6.io/k6-summary/0.0.1/index.js';
-
-// Fallback simple HTML report generator
-function htmlReport(data) {
-  const metrics = data.metrics || {};
-  const duration = metrics.http_req_duration || {};
-  const reqs = metrics.http_reqs || {};
-  const failed = metrics.http_req_failed || {};
-  
-  return `<!DOCTYPE html>
-<html>
-<head><title>K6 Spike Test Report</title></head>
-<body>
-<h1>K6 Spike Performance Test Report</h1>
-<h2>Summary</h2>
-<ul>
-<li>Total Requests: ${reqs.count || 0}</li>
-<li>Failed Requests: ${Math.round((reqs.count || 0) * (failed.rate || 0))}</li>
-<li>Average Response Time: ${Math.round(duration.avg || 0)}ms</li>
-<li>95th Percentile: ${Math.round(duration['p(95)'] || 0)}ms</li>
-</ul>
-<h2>Generated: ${new Date().toISOString()}</h2>
-</body>
-</html>`;
-}
-
-// Fallback text summary
-function textSummary(data) {
-  const metrics = data.metrics || {};
-  const duration = metrics.http_req_duration || {};
-  const reqs = metrics.http_reqs || {};
-  
-  return `
-K6 Spike Test Results:
-======================
-• Total Requests: ${reqs.count || 0}
-• Avg Response Time: ${Math.round(duration.avg || 0)}ms
-• P95 Response Time: ${Math.round(duration['p(95)'] || 0)}ms
-• Success Rate: ${Math.round((1 - (metrics.http_req_failed?.rate || 0)) * 100)}%
-`;
-}
 
 // Custom metrics for detailed analysis
 const responseTimeTrend = new Trend('custom_response_time');
@@ -98,19 +55,20 @@ export default function() {
 }
 
 
-// K6 handleSummary callback - generates only HTML report + console output
+// K6 handleSummary callback - generates only JSON output
 export function handleSummary(data) {
-  console.log('📊 Generating K6 spike test reports...');
+  console.log('📊 Generating K6 spike test results...');
   
   try {
-    const htmlContent = htmlReport(data);
-    const textContent = textSummary(data);
-    
-    console.log('✅ HTML spike report generated successfully');
+    console.log('✅ JSON results generated successfully');
     
     return {
-      'reports/{{test_id}}_standard_report.html': htmlContent,
-      stdout: textContent,
+      // JSON files that MCP server expects
+      'test_{{test_id}}_summary.json': JSON.stringify(data, null, 2),
+      'test_{{test_id}}_results.json': JSON.stringify(data, null, 2),
+      
+      // Console output with basic summary
+      stdout: `K6 Spike Test completed. Results saved to JSON files and HTML dashboard (html-report_{{test_id}}.html).`,
     };
   } catch (error) {
     console.error('❌ Error in spike handleSummary():', error.message);
@@ -118,7 +76,7 @@ export function handleSummary(data) {
     
     return {
       'reports/{{test_id}}_error_log.txt': `Error in handleSummary(): ${error.message}\nStack: ${error.stack}\nData keys: ${Object.keys(data).join(', ')}`,
-      stdout: `Error generating spike reports: ${error.message}`,
+      stdout: `Error generating spike results: ${error.message}`,
     };
   }
 }

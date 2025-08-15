@@ -18,7 +18,7 @@ from har_models import (
     HARFile, HAREntry, HARRequest, HARConversionOptions, HARAnalysisResult, 
     ChainPoint, PageGroup, RequestType, StaticFilesConfig
 )
-from multi_request_models import K6MultiRequestConfig, RequestStep
+from multi_request_models import K6WorkflowConfig, RequestStep, K6WorkflowConfig  # K6WorkflowConfig for backward compatibility
 from static_files_manager import StaticFilesManager
 from template_engine import TemplateEngine
 from security_utils import (
@@ -131,7 +131,149 @@ class HARProcessor:
             recommendations=recommendations
         )
     
-    def convert_har_to_workflow(self, har_file: HARFile, workflow_name: Optional[str] = None) -> K6MultiRequestConfig:
+    def preview_har_conversion(self, har_content: str, options: Optional[HARConversionOptions] = None) -> str:
+        """
+        Preview what a HAR file conversion will look like without actually creating the workflow.
+        Shows detailed information about detected requests, chaining opportunities, and static files.
+        """
+        try:
+            # Parse HAR file
+            har_file = self.parse_har_file(har_content)
+            analysis = self.analyze_har_file(har_file)
+            
+            # Use provided options or instance options
+            conversion_options = options or self.options
+            
+            preview = f"""🔍 HAR Conversion Preview
+{'='*50}
+
+📋 HAR File Analysis:
+• Pages: {len(har_file.log.pages)}
+• Total Entries: {len(har_file.log.entries)}
+• Creator: {har_file.log.creator.name} {har_file.log.creator.version}"""
+
+            # Show request breakdown by type
+            request_types = defaultdict(int)
+            domains = set()
+            for entry in har_file.log.entries:
+                url = entry.request.url
+                domains.add(urlparse(url).netloc)
+                
+                # Classify request type
+                if any(ext in url.lower() for ext in ['.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.woff']):
+                    request_types['static'] += 1
+                elif any(pattern in url.lower() for pattern in ['api', 'json', 'ajax']):
+                    request_types['api'] += 1
+                else:
+                    request_types['other'] += 1
+
+            preview += f"\n\n📊 Request Breakdown:"
+            preview += f"\n• API Requests: {request_types.get('api', 0)}"
+            preview += f"\n• Static Files: {request_types.get('static', 0)}"
+            preview += f"\n• Other Requests: {request_types.get('other', 0)}"
+            preview += f"\n• Unique Domains: {len(domains)}"
+
+            # Show domain list
+            if domains:
+                preview += f"\n\n🌐 Domains:"
+                for domain in sorted(domains)[:5]:  # Show first 5 domains
+                    preview += f"\n• {domain}"
+                if len(domains) > 5:
+                    preview += f"\n• ... and {len(domains) - 5} more domains"
+
+            # Show conversion options
+            preview += f"\n\n⚙️ Conversion Options:"
+            preview += f"\n• Include Static Files: {'Yes' if conversion_options.include_static_resources else 'No'}"
+            preview += f"\n• Max Requests: {conversion_options.max_requests}"
+            preview += f"\n• Think Time: {conversion_options.think_time}s"
+            preview += f"\n• Filter by Domain: {conversion_options.filter_domain or 'None'}"
+            preview += f"\n• Share Cookies: {'Yes' if conversion_options.share_cookies else 'No'}"
+
+            # Apply filtering to see what will be included
+            filtered_entries = self._filter_entries(har_file.log.entries, conversion_options)
+            excluded_count = len(har_file.log.entries) - len(filtered_entries)
+
+            preview += f"\n\n🔄 After Filtering:"
+            preview += f"\n• Requests to Include: {len(filtered_entries)}"
+            if excluded_count > 0:
+                preview += f"\n• Requests Excluded: {excluded_count}"
+
+            # Show chaining opportunities
+            try:
+                chain_points = analysis.chain_points
+                if chain_points:
+                    preview += f"\n\n🔗 Response Chaining Opportunities:"
+                    preview += f"\n• Potential Chain Points: {len(chain_points)}"
+                    for i, chain in enumerate(chain_points[:3], 1):  # Show first 3
+                        preview += f"\n  {i}. {chain.extraction_path} → Used in subsequent requests"
+                    if len(chain_points) > 3:
+                        preview += f"\n  ... and {len(chain_points) - 3} more chain points"
+                else:
+                    preview += f"\n\n🔗 Response Chaining: No automatic chaining opportunities detected"
+            except Exception as e:
+                preview += f"\n\n🔗 Response Chaining: Analysis failed ({str(e)})"
+
+            # Show static files handling
+            if conversion_options.include_static_resources and request_types.get('static', 0) > 0:
+                preview += f"\n\n🎨 Static Files Handling:"
+                preview += f"\n• Static Files Count: {request_types.get('static', 0)}"
+                
+                # Group by type
+                static_types = defaultdict(int)
+                for entry in har_file.log.entries:
+                    url = entry.request.url.lower()
+                    if '.js' in url:
+                        static_types['JavaScript'] += 1
+                    elif '.css' in url:
+                        static_types['CSS'] += 1
+                    elif any(ext in url for ext in ['.png', '.jpg', '.jpeg', '.gif', '.svg']):
+                        static_types['Images'] += 1
+                    elif '.woff' in url:
+                        static_types['Fonts'] += 1
+
+                for file_type, count in static_types.items():
+                    preview += f"\n• {file_type}: {count} files"
+
+                preview += f"\n• Loading Strategy: {conversion_options.static_files_config.load_pattern}"
+                preview += f"\n• Parallel Loading: {'Yes' if conversion_options.static_files_config.parallel_loading else 'No'}"
+
+            # Show estimated workflow structure
+            page_groups = self._group_by_pages(filtered_entries, har_file.log.pages)
+            preview += f"\n\n🚀 Generated Workflow Structure:"
+            preview += f"\n• Workflow Name: {conversion_options.workflow_name or 'har_workflow'}"
+            preview += f"\n• Page Groups: {len(page_groups)}"
+            preview += f"\n• Total Steps: {len(filtered_entries)}"
+
+            if page_groups:
+                preview += f"\n\n📋 Page Breakdown:"
+                for i, (page_title, entries) in enumerate(page_groups.items(), 1):
+                    preview += f"\n  {i}. {page_title}: {len(entries)} requests"
+                    if i >= 5:  # Limit to first 5 pages
+                        remaining = len(page_groups) - 5
+                        if remaining > 0:
+                            preview += f"\n  ... and {remaining} more pages"
+                        break
+
+            # Show expected output
+            preview += f"\n\n📊 Expected Output:"
+            preview += f"\n• Test ID Format: k6_har_<timestamp>"
+            preview += f"\n• JSON Results: Detailed HAR workflow metrics"
+            preview += f"\n• Page Timing: Original timing preservation"
+            preview += f"\n• Variable Extraction: Automatic cookie and session handling"
+
+            preview += f"\n\n🎯 Next Steps:"
+            preview += f"\n• Use 'run_k6_har_test' to execute this HAR conversion"
+            preview += f"\n• Adjust conversion options if needed"
+            preview += f"\n• The test will require confirmation before running"
+            preview += f"\n• Results will include both individual request and page-level metrics"
+
+            return preview
+
+        except Exception as e:
+            logger.error(f"Error generating HAR preview: {str(e)}")
+            return f"Error generating HAR preview: {str(e)}"
+    
+    def convert_har_to_workflow(self, har_file: HARFile, workflow_name: Optional[str] = None) -> K6WorkflowConfig:
         """
         Convert HAR file to K6 multi-request workflow configuration.
         
@@ -140,7 +282,7 @@ class HARProcessor:
             workflow_name: Name for the generated workflow
             
         Returns:
-            K6MultiRequestConfig ready for execution
+            K6WorkflowConfig ready for execution
         """
         entries = har_file.log.entries
         
@@ -169,7 +311,7 @@ class HARProcessor:
         # Create static files configuration
         static_config = self.static_manager.generate_static_files_config(page_groups)
         
-        return K6MultiRequestConfig(
+        return K6WorkflowConfig(
             workflow_name=workflow_name,
             description=f"Generated from HAR file with {len(filtered_entries)} requests",
             steps=request_steps,

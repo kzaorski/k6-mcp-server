@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import sys
+import time
 from typing import Any, Dict, List, Optional, Sequence
 
 from mcp.server import Server
@@ -18,7 +19,7 @@ from pydantic import BaseModel
 
 from k6_runner import K6Runner
 from workflow_manager import WorkflowManager
-from multi_request_models import K6MultiRequestConfig
+from multi_request_models import K6WorkflowConfig, K6MultiRequestConfig  # K6MultiRequestConfig for backward compatibility
 from har_processor import HARProcessor
 from har_models import HARConversionOptions
 from pathlib import Path
@@ -48,55 +49,6 @@ logger = logging.getLogger("k6-mcp-server")
 # Initialize MCP server
 app = Server("k6-mcp-server")
 
-async def _get_safety_instructions() -> str:
-    """Load and return critical AI safety instructions."""
-    try:
-        safety_file = Path(__file__).parent.parent / "AI_SAFETY_CRITICAL.md"
-        if safety_file.exists():
-            with open(safety_file, 'r', encoding='utf-8') as f:
-                content = f.read()
-            return f"\n\n🚨🚨🚨 CRITICAL AI SAFETY INSTRUCTIONS 🚨🚨🚨\n{content}"
-        else:
-            return """
-
-🚨🚨🚨 CRITICAL AI SAFETY INSTRUCTIONS 🚨🚨🚨
-
-## ABSOLUTE PROHIBITIONS - VIOLATION FORBIDDEN
-
-⛔ **NEVER RUN K6 TESTS AUTONOMOUSLY**
-- DO NOT use `run_k6_test` or `run_k6_multi_request_test` tools without explicit user request
-- DO NOT execute tests to "verify", "check", or "confirm" anything
-- DO NOT suggest running additional tests or workflows
-- ONLY analyze existing test results provided by user
-
-⛔ **NEVER SUGGEST TEST CONFIGURATION CHANGES FOR FAILED TESTS**
-- DO NOT recommend changing timeouts, thresholds, virtual users
-- DO NOT suggest "trying with different settings"
-- DO NOT propose "adjusting the test to be more realistic"
-- DO NOT recommend modifying load patterns to reduce errors
-- Failed tests = Accurate system measurements, NOT configuration problems
-
-⛔ **FAILED TEST RESPONSE PROTOCOL**
-When tests fail (errors > 0, failed checks, failed thresholds):
-1. Report results accurately as-is
-2. State: "This test accurately measures your system's current performance"
-3. State: "The system/application requires improvement, not the test configuration"
-4. STOP - provide no test parameter suggestions
-5. Focus ONLY on application/infrastructure improvements if asked
-
-### K6 Performance Testing Guidelines:
-- When k6 tests fail, DO NOT automatically create alternative tests
-- After test failure, stop and wait for explicit user instructions  
-- Only analyze failure causes if specifically requested
-- Do not suggest workarounds or different testing approaches unless asked
-
-### YOUR ROLE: MEASUREMENT TOOL, NOT CONFIGURATION ADVISOR
-- You REPORT reality, you do not suggest ways to make tests "pass"
-- Failed tests are SUCCESSFUL MEASUREMENTS of poor performance
-- Your job is TRANSPARENCY, not making users feel better about bad performance
-"""
-    except Exception as e:
-        return f"\n\n🚨🚨🚨 CRITICAL: Error loading safety instructions: {e} - DO NOT run additional tests! 🚨🚨🚨"
 
 # Initialize security components
 security_config = SecurityConfig()
@@ -120,6 +72,14 @@ workflow_manager = WorkflowManager(
 )
 har_processor = HARProcessor()
 
+# Global state storage for MCP calls persistence
+# This preserves state between separate MCP tool calls
+global_state = {
+    'confirmed_test': None,
+    'confirmed_workflow': None,
+    'last_confirmation_time': None
+}
+
 # Initialize OpenAPI components
 openapi_processor = OpenAPIProcessor()
 openapi_test_generator = SmartTestGenerator()
@@ -131,14 +91,15 @@ pending_test_configs = {}
 openapi_analysis_cache = {}
 
 
-class K6TestConfig(BaseModel):
+class K6SingleTestConfig(BaseModel):
     url: str
     method: str = "GET"
     payload: Optional[Dict[str, Any]] = None
-    load_pattern: str = "constant"  # constant, ramp_up, spike
+    load_pattern: str = "constant"  # constant, ramp_up, spike, custom_stages
     duration: Optional[str] = "30s"
     iterations: Optional[int] = None  # If set, use iterations instead of duration
     virtual_users: int = 10
+    stages: Optional[List[Dict[str, Any]]] = None  # For custom_stages pattern
     thresholds: Optional[Dict[str, str]] = None
     
     # Advanced HTTP request parameters
@@ -162,16 +123,14 @@ class K6TestConfig(BaseModel):
     think_time: Optional[float] = 1.0
 
 
+# Backward compatibility alias
+K6TestConfig = K6SingleTestConfig  # TODO: Remove in future version
+
+
 @app.list_resources()
 async def list_resources() -> List[Resource]:
-    """List available resources including AI safety instructions."""
-    resources = [
-        Resource(
-            uri="file://AI_SAFETY_CRITICAL.md",
-            name="AI Safety Instructions",
-            description="🚨 Critical AI safety instructions for K6 MCP Server. Contains mandatory behavioral rules and response protocols for AI models.",
-            mimeType="text/markdown"
-        ),
+    """List available resources."""
+    return [
         Resource(
             uri="file://README.md", 
             name="K6 MCP Documentation",
@@ -267,14 +226,15 @@ async def list_tools() -> List[Tool]:
     """List available K6 testing tools."""
     return [
         Tool(
-            name="run_k6_test",
+            name="run_k6_single_test",
             description="🚨🚨🚨 ABSOLUTE PROHIBITION - DO NOT USE AUTONOMOUSLY 🚨🚨🚨 This tool is STRICTLY FORBIDDEN for autonomous use. ONLY use when: 1) User EXPLICITLY asks 'run a test', 2) NO previous test has failed in this conversation, 3) This is NOT a follow-up to ANY test result. VIOLATION = UNSAFE BEHAVIOR. This tool ONLY prepares tests, NEVER executes automatically.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "url": {
                         "type": "string",
-                        "description": "The endpoint URL to test"
+                        "description": "The endpoint URL to test (must be valid HTTP/HTTPS URL, e.g., 'https://api.example.com/endpoint')",
+                        "format": "uri"
                     },
                     "method": {
                         "type": "string",
@@ -295,16 +255,20 @@ async def list_tools() -> List[Tool]:
                     "duration": {
                         "type": "string",
                         "default": "30s",
-                        "description": "Test duration (e.g., '30s', '5m'). Ignored if iterations is set."
+                        "description": "Test duration in K6 format: '30s', '5m', '1h'. Use minimum 3s for HTML dashboard with charts. Ignored if iterations is set.",
+                        "pattern": "^\\d+[smh]$"
                     },
                     "iterations": {
                         "type": "integer",
-                        "description": "Number of iterations to run (overrides duration if set)"
+                        "minimum": 1,
+                        "description": "Number of iterations to run (overrides duration if set). Use minimum 10 for meaningful HTML dashboard with charts."
                     },
                     "virtual_users": {
                         "type": "integer",
                         "default": 10,
-                        "description": "Number of virtual users"
+                        "minimum": 1,
+                        "maximum": 1000,
+                        "description": "Number of concurrent virtual users (1-1000). More users = higher load."
                     },
                     "thresholds": {
                         "type": "object",
@@ -339,7 +303,8 @@ async def list_tools() -> List[Tool]:
                     "timeout": {
                         "type": "string",
                         "default": "30s",
-                        "description": "Request timeout"
+                        "description": "Request timeout in K6 format: '30s', '5m'. Controls individual HTTP request timeout.",
+                        "pattern": "^\\d+[smh]$"
                     },
                     "retry_attempts": {
                         "type": "integer",
@@ -377,6 +342,121 @@ async def list_tools() -> List[Tool]:
             }
         ),
         Tool(
+            name="run_k6_custom_stages_test",
+            description="🚨🚨🚨 ABSOLUTE PROHIBITION - DO NOT USE AUTONOMOUSLY 🚨🚨🚨 This tool allows running K6 tests with custom load stages (e.g., 1min→1user, 2min→2users, 3min→10users). ONLY use when: 1) User EXPLICITLY asks for custom stage testing, 2) NO previous test has failed in this conversation, 3) This is NOT a follow-up to ANY test result.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The endpoint URL to test (must be valid HTTP/HTTPS URL, e.g., 'https://api.example.com/endpoint')",
+                        "format": "uri"
+                    },
+                    "method": {
+                        "type": "string",
+                        "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"],
+                        "default": "GET",
+                        "description": "HTTP method to use"
+                    },
+                    "payload": {
+                        "type": "object",
+                        "description": "JSON payload for POST/PUT requests"
+                    },
+                    "stages": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "duration": {
+                                    "type": "string",
+                                    "description": "Stage duration in K6 format: '30s', '1m', '2h'",
+                                    "pattern": "^\\d+[smh]$"
+                                },
+                                "target": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 1000,
+                                    "description": "Target number of virtual users at the end of this stage (0-1000)"
+                                }
+                            },
+                            "required": ["duration", "target"]
+                        },
+                        "minItems": 1,
+                        "maxItems": 20,
+                        "description": "Array of load stages. Each stage ramps VUs to target over duration. Example: [{duration:'1m', target:1}, {duration:'1m', target:2}, {duration:'1m', target:10}]"
+                    },
+                    "thresholds": {
+                        "type": "object",
+                        "description": "Performance thresholds (optional)"
+                    },
+                    "headers": {
+                        "type": "object",
+                        "description": "Custom HTTP headers"
+                    },
+                    "auth": {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": ["bearer", "basic", "apikey"]
+                            },
+                            "token": {"type": "string"},
+                            "username": {"type": "string"},
+                            "password": {"type": "string"},
+                            "header_name": {"type": "string"}
+                        },
+                        "description": "Authentication configuration"
+                    },
+                    "cookies": {
+                        "type": "object",
+                        "description": "HTTP cookies"
+                    },
+                    "query_params": {
+                        "type": "object",
+                        "description": "URL query parameters"
+                    },
+                    "timeout": {
+                        "type": "string",
+                        "default": "30s",
+                        "description": "Request timeout in K6 format: '30s', '5m'. Controls individual HTTP request timeout.",
+                        "pattern": "^\\d+[smh]$"
+                    },
+                    "retry_attempts": {
+                        "type": "integer",
+                        "default": 0,
+                        "description": "Number of retry attempts"
+                    },
+                    "env_variables": {
+                        "type": "object",
+                        "description": "Environment variables for K6 script"
+                    },
+                    "data_generators": {
+                        "type": "object",
+                        "description": "Data generators configuration"
+                    },
+                    "data_file": {
+                        "type": "string",
+                        "description": "Path to data file (CSV/JSON)"
+                    },
+                    "payload_template": {
+                        "type": "string",
+                        "description": "Dynamic payload template with variables"
+                    },
+                    "log_requests": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Log detailed request information (URL, headers, payload) for debugging"
+                    },
+                    "think_time": {
+                        "type": "number",
+                        "default": 1.0,
+                        "description": "Time in seconds to pause between requests (think time to simulate user behavior)"
+                    }
+                },
+                "required": ["url", "stages"]
+            }
+        ),
+        Tool(
             name="get_test_results",
             description="Get results from the last K6 test run",
             inputSchema={
@@ -385,11 +465,6 @@ async def list_tools() -> List[Tool]:
                     "test_id": {
                         "type": "string",
                         "description": "Optional test ID to get specific results"
-                    },
-                    "include_template": {
-                        "type": "boolean",
-                        "default": False,
-                        "description": "Include report generation template instructions"
                     }
                 }
             }
@@ -403,18 +478,52 @@ async def list_tools() -> List[Tool]:
             }
         ),
         Tool(
-            name="confirm_and_execute_test",
-            description="Respond to test confirmation dialog with y/n and execute if confirmed",
+            name="confirm_test",
+            description="Confirm pending test execution with y/n response",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "response": {
                         "type": "string",
                         "enum": ["y", "n", "yes", "no"],
-                        "description": "User response to test confirmation (y/yes to execute, n/no to cancel)"
+                        "default": "n",
+                        "description": "User response to test confirmation (y/yes to confirm, n/no to cancel). Default: n"
                     }
                 },
                 "required": ["response"]
+            }
+        ),
+        Tool(
+            name="execute_confirmed_test",
+            description="🚨 Execute previously confirmed test. ONLY call this after confirm_test returns 'confirmed'",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False
+            }
+        ),
+        Tool(
+            name="confirm_test_interactive",
+            description="🚨 INTERACTIVE: Ask user for test confirmation and wait for their response. This tool requires user interaction.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "confirmation_message": {
+                        "type": "string",
+                        "default": "Do you want to run this test? (y/n)",
+                        "description": "Message to show to user for confirmation"
+                    }
+                },
+                "additionalProperties": False
+            }
+        ),
+        Tool(
+            name="check_confirmation_state", 
+            description="Debug tool: Check current confirmation state for troubleshooting",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False
             }
         ),
         Tool(
@@ -437,14 +546,15 @@ async def list_tools() -> List[Tool]:
             }
         ),
         Tool(
-            name="run_k6_multi_request_test", 
+            name="run_k6_workflow_test", 
             description="🚨🚨🚨 ABSOLUTE PROHIBITION - DO NOT USE AUTONOMOUSLY 🚨🚨🚨 This tool is STRICTLY FORBIDDEN for autonomous use. ONLY use when: 1) User EXPLICITLY asks for 'multi-request test', 2) NO previous test has failed in this conversation, 3) This is NOT a follow-up to ANY test result. VIOLATION = UNSAFE BEHAVIOR. This tool ONLY prepares workflows, NEVER executes automatically.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "workflow_name": {
                         "type": "string",
-                        "description": "Name of the multi-request workflow"
+                        "description": "Name of the multi-request workflow (must start with letter, contain only letters, numbers, underscore, hyphen - no spaces)",
+                        "pattern": "^[a-zA-Z][a-zA-Z0-9_-]*$"
                     },
                     "description": {
                         "type": "string",
@@ -456,9 +566,9 @@ async def list_tools() -> List[Tool]:
                         "items": {
                             "type": "object",
                             "properties": {
-                                "step_id": {"type": "string", "description": "Unique step identifier"},
+                                "step_id": {"type": "string", "description": "Unique step identifier (must be valid identifier: letters, numbers, underscore, no spaces)", "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"},
                                 "name": {"type": "string", "description": "Human-readable step name"},
-                                "url": {"type": "string", "description": "Request URL (may contain template variables)"},
+                                "url": {"type": "string", "description": "Request URL (may contain template variables like {{variable}}). Must be valid HTTP/HTTPS URL.", "format": "uri"},
                                 "method": {"type": "string", "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"], "default": "GET"},
                                 "payload": {"type": "object", "description": "Request payload for POST/PUT requests"},
                                 "headers": {"type": "object", "description": "Custom HTTP headers"},
@@ -472,8 +582,8 @@ async def list_tools() -> List[Tool]:
                             "required": ["step_id", "name", "url"]
                         }
                     },
-                    "virtual_users": {"type": "integer", "default": 1, "description": "Number of virtual users"},
-                    "iterations": {"type": "integer", "description": "Number of iterations (overrides duration if set)"},
+                    "virtual_users": {"type": "integer", "default": 1, "minimum": 1, "maximum": 1000, "description": "Number of concurrent virtual users (1-1000). More users = higher load."},
+                    "iterations": {"type": "integer", "minimum": 1, "description": "Number of iterations to run (overrides duration if set). Use minimum 10 for meaningful HTML dashboard."},
                     "duration": {"type": "string", "default": "30s", "description": "Test duration"},
                     "execution_mode": {"type": "string", "enum": ["sequential", "parallel"], "default": "sequential"},
                     "load_pattern": {"type": "string", "enum": ["constant", "ramp_up", "spike"], "default": "constant"},
@@ -605,7 +715,7 @@ async def list_tools() -> List[Tool]:
             }
         ),
         Tool(
-            name="har_to_k6_test", 
+            name="run_k6_har_test", 
             description="🚨🚨🚨 CRITICAL SAFETY WARNING 🚨🚨🚨 NEVER use this tool autonomously! ONLY when user EXPLICITLY requests HAR-based test! Load HAR file and execute K6 performance test with configurable options",
             inputSchema={
                 "type": "object",
@@ -616,7 +726,8 @@ async def list_tools() -> List[Tool]:
                     },
                     "workflow_name": {
                         "type": "string",
-                        "description": "Name for the generated workflow"
+                        "description": "Name for the generated workflow (must start with letter, contain only letters, numbers, underscore, hyphen - no spaces)",
+                        "pattern": "^[a-zA-Z][a-zA-Z0-9_-]*$"
                     },
                     "test_options": {
                         "type": "object",
@@ -877,13 +988,13 @@ async def call_tool(name: str, arguments: Dict[str, Any]):
     """Handle tool calls for K6 testing operations."""
     
     try:
-        if name == "run_k6_test":
+        if name in ("run_k6_single_test", "run_k6_test"):  # Support both old and new names
             # 🚨🚨🚨 CRITICAL SAFETY CHECK 🚨🚨🚨
             # This tool is FORBIDDEN for autonomous use
             logger.warning("🚨 SAFETY ALERT: run_k6_test tool was called - this should ONLY happen on explicit user request")
             logger.warning("🚨 If this was called autonomously by AI, this is a SAFETY VIOLATION")
             
-            config = K6TestConfig(**arguments)
+            config = K6SingleTestConfig(**arguments)
             logger.info(f"Preparing K6 test for {config.url} - PREPARATION ONLY, NOT EXECUTION")
             
             result = await k6_runner.prepare_test(config)
@@ -896,19 +1007,31 @@ async def call_tool(name: str, arguments: Dict[str, Any]):
                 ]
             }
             
+        elif name == "run_k6_custom_stages_test":
+            # 🚨🚨🚨 CRITICAL SAFETY CHECK 🚨🚨🚨
+            # This tool is FORBIDDEN for autonomous use
+            logger.warning("🚨 SAFETY ALERT: run_k6_custom_stages_test tool was called - this should ONLY happen on explicit user request")
+            logger.warning("🚨 If this was called autonomously by AI, this is a SAFETY VIOLATION")
+            
+            # Set load_pattern to custom_stages and prepare config
+            arguments['load_pattern'] = 'custom_stages'
+            config = K6SingleTestConfig(**arguments)
+            logger.info(f"Preparing K6 custom stages test for {config.url} with {len(config.stages)} stages - PREPARATION ONLY, NOT EXECUTION")
+            
+            result = await k6_runner.prepare_test(config)
+            
+            logger.info(f"Returning custom stages result with length: {len(result)}")
+            
+            return {
+                "content": [
+                    {"type": "text", "text": result}
+                ]
+            }
+            
         elif name == "get_test_results":
             test_id = arguments.get("test_id")
-            include_template = arguments.get("include_template", False)
             
             results = await k6_runner.get_results(test_id)
-            
-            # If template instructions are requested, append them
-            if include_template:
-                template_instructions = "\n\n" + "="*80 + "\n"
-                template_instructions += "## 📋 REPORT GENERATION INSTRUCTIONS\n\n"
-                template_instructions += "Use the following template to generate a comprehensive report:\n\n"
-                template_instructions += ReportInstructions.get_report_template()
-                results += template_instructions
             
             return {
                 "content": [
@@ -949,22 +1072,29 @@ async def call_tool(name: str, arguments: Dict[str, Any]):
                 ]
             }
             
-        elif name == "confirm_and_execute_test":
-            response = arguments.get("response")
+        elif name == "confirm_test":
+            response = arguments.get("response", "n")  # Default to "n" for safety
             
             if not response:
-                return {
-                    "content": [
-                        {"type": "text", "text": "Error: response is required"}
-                    ],
-                    "isError": True
-                }
+                response = "n"  # Fallback safety
             
             # Check if this is a workflow confirmation or single test confirmation
             if workflow_manager.pending_workflow:
-                result = await workflow_manager.confirm_workflow_execution(response)
+                result = await workflow_manager.confirm_workflow(response)
+                # Save to global state for MCP persistence
+                if "confirmed and ready" in result:
+                    global_state['confirmed_workflow'] = workflow_manager.confirmed_workflow
+                    global_state['confirmed_test'] = None
+                    global_state['last_confirmation_time'] = time.time()
+                    logger.info("Workflow confirmed and saved to global state")
             else:
-                result = await k6_runner.confirm_test_execution(response)
+                result = await k6_runner.confirm_test(response)
+                # Save to global state for MCP persistence  
+                if "confirmed and ready" in result:
+                    global_state['confirmed_test'] = k6_runner.confirmed_config
+                    global_state['confirmed_workflow'] = None
+                    global_state['last_confirmation_time'] = time.time()
+                    logger.info("Test confirmed and saved to global state")
             
             return {
                 "content": [
@@ -972,13 +1102,132 @@ async def call_tool(name: str, arguments: Dict[str, Any]):
                 ]
             }
             
-        elif name == "run_k6_multi_request_test":
+        elif name == "execute_confirmed_test":
+            # Execute previously confirmed test using global state
+            
+            # Check global state first (for MCP persistence)
+            if global_state['confirmed_workflow'] is not None:
+                # Restore workflow state and execute
+                workflow_manager.confirmed_workflow = global_state['confirmed_workflow']
+                result = await workflow_manager.execute_confirmed_workflow()
+                # Clear global state after execution
+                global_state['confirmed_workflow'] = None
+                global_state['last_confirmation_time'] = None
+                logger.info("Workflow executed from global state")
+                
+            elif global_state['confirmed_test'] is not None:
+                # Restore test state and execute
+                k6_runner.confirmed_config = global_state['confirmed_test']
+                result = await k6_runner.execute_confirmed_test()
+                # Clear global state after execution
+                global_state['confirmed_test'] = None
+                global_state['last_confirmation_time'] = None
+                logger.info("Test executed from global state")
+                
+            # Fallback to local state (backward compatibility)
+            elif workflow_manager.confirmed_workflow is not None:
+                result = await workflow_manager.execute_confirmed_workflow()
+            elif k6_runner.confirmed_config is not None:
+                result = await k6_runner.execute_confirmed_test()
+            else:
+                result = "No confirmed test ready for execution. Use confirm_test first."
+            
+            return {
+                "content": [
+                    {"type": "text", "text": result}
+                ]
+            }
+            
+        elif name == "confirm_test_interactive":
+            # Interactive confirmation tool
+            confirmation_message = arguments.get("confirmation_message", "Do you want to run this test? (y/n)")
+            
+            # Check what's pending
+            if workflow_manager.pending_workflow:
+                config = workflow_manager.pending_workflow['config']
+                test_type = f"workflow '{config.workflow_name}' ({len(config.steps)} steps)"
+            elif k6_runner.pending_config:
+                config = k6_runner.pending_config['config']
+                test_type = f"test for {config.url}"
+            else:
+                return {
+                    "content": [
+                        {"type": "text", "text": "No pending test or workflow to confirm. Please run a test preparation tool first."}
+                    ],
+                    "isError": True
+                }
+            
+            # Return interactive confirmation request
+            interactive_message = f"""
+🎯 **Test Ready for Confirmation**
+
+**Pending {test_type}**
+
+{confirmation_message}
+
+**Instructions:**
+1. Type "y" or "yes" to confirm and proceed
+2. Type "n" or "no" to cancel the test
+3. Use `confirm_test` tool with your response
+
+⚠️ **This requires your explicit response - the test will NOT run automatically**
+"""
+            
+            return {
+                "content": [
+                    {"type": "text", "text": interactive_message}
+                ]
+            }
+            
+        elif name == "check_confirmation_state":
+            # Debug tool to check confirmation state
+            
+            # Check global state
+            global_test = global_state.get('confirmed_test')
+            global_workflow = global_state.get('confirmed_workflow') 
+            global_time = global_state.get('last_confirmation_time')
+            
+            # Check local state  
+            local_test = k6_runner.confirmed_config
+            local_workflow = workflow_manager.confirmed_workflow
+            pending_test = k6_runner.pending_config
+            pending_workflow = workflow_manager.pending_workflow
+            
+            state_report = f"""
+🔍 **Confirmation State Debug Report**
+
+**Global State (MCP Persistence):**
+• Confirmed Test: {'Yes' if global_test else 'None'}
+• Confirmed Workflow: {'Yes' if global_workflow else 'None'}  
+• Last Confirmation: {time.strftime('%H:%M:%S', time.localtime(global_time)) if global_time else 'None'}
+
+**Local State (Instance):**
+• Confirmed Test: {'Yes' if local_test else 'None'}
+• Confirmed Workflow: {'Yes' if local_workflow else 'None'}
+• Pending Test: {'Yes' if pending_test else 'None'} 
+• Pending Workflow: {'Yes' if pending_workflow else 'None'}
+
+**Ready for Execution:**
+• Global Ready: {'Yes' if (global_test or global_workflow) else 'No'}
+• Local Ready: {'Yes' if (local_test or local_workflow) else 'No'}
+
+**Next Steps:**
+{f'• Use execute_confirmed_test to run the confirmed test' if (global_test or global_workflow or local_test or local_workflow) else '• No confirmed tests - use confirm_test first'}
+"""
+            
+            return {
+                "content": [
+                    {"type": "text", "text": state_report}
+                ]
+            }
+            
+        elif name in ("run_k6_workflow_test", "run_k6_multi_request_test"):  # Support both old and new names
             # 🚨🚨🚨 CRITICAL SAFETY CHECK 🚨🚨🚨
             logger.warning("🚨 SAFETY ALERT: run_k6_multi_request_test tool was called - this should ONLY happen on explicit user request")
             logger.warning("🚨 If this was called autonomously by AI, this is a SAFETY VIOLATION")
             
             try:
-                config = K6MultiRequestConfig(**arguments)
+                config = K6WorkflowConfig(**arguments)
                 logger.info(f"Preparing K6 multi-request workflow '{config.workflow_name}' - PREPARATION ONLY, NOT EXECUTION")
                 
                 result = await workflow_manager.prepare_workflow(config)
@@ -1021,7 +1270,7 @@ async def call_tool(name: str, arguments: Dict[str, Any]):
                     elif workflow_type == "crud_operations":
                         result = await workflow_manager.create_workflow_from_template("crud_operations", parameters)
                     else:
-                        result = "Custom workflow creation not yet implemented. Use run_k6_multi_request_test directly."
+                        result = "Custom workflow creation not yet implemented. Use run_k6_workflow_test directly."
                 
                 return {
                     "content": [
@@ -1050,7 +1299,7 @@ async def call_tool(name: str, arguments: Dict[str, Any]):
                 }
             
             try:
-                config = K6MultiRequestConfig(**workflow_config)
+                config = K6WorkflowConfig(**workflow_config)
                 validation_errors = await workflow_manager.validate_workflow(config)
                 
                 if validation_errors:
@@ -1172,8 +1421,8 @@ async def call_tool(name: str, arguments: Dict[str, Any]):
 {json.dumps(workflow_config.model_dump(), indent=2)}
 
 🚀 Ready for Execution:
-You can now use 'run_k6_multi_request_test' with this configuration or 
-use 'har_to_k6_test' for direct execution."""
+You can now use 'run_k6_workflow_test' with this configuration or 
+use 'run_k6_har_test' for direct execution."""
 
                 return {
                     "content": [
@@ -1190,7 +1439,7 @@ use 'har_to_k6_test' for direct execution."""
                     "isError": True
                 }
         
-        elif name == "har_to_k6_test":
+        elif name in ("run_k6_har_test", "har_to_k6_test"):  # Support both old and new names
             # ⚠️ CRITICAL: This tool should ONLY be used when user explicitly requests a HAR-based test
             har_content = arguments.get("har_content")
             workflow_name = arguments.get("workflow_name")
@@ -1496,7 +1745,7 @@ use 'har_to_k6_test' for direct execution."""
                 result += f"""
 
 ✅ Tests Ready for Execution:
-• Use 'run_k6_multi_request_test' with any of the generated configurations
+• Use 'run_k6_workflow_test' with any of the generated configurations
 • Each test includes intelligent data generation and response chaining
 • Authentication flows and CRUD operations are automatically handled
 
@@ -1925,7 +2174,7 @@ Use 'generate_tests_from_openapi' to create executable K6 test configurations fr
                     result += f"""
 
 🚀 Ready to Execute:
-• Use 'run_k6_multi_request_test' with the generated test IDs
+• Use 'run_k6_workflow_test' with the generated test IDs
 • Use 'get_test_results' after execution to see detailed reports
 • Each test includes intelligent data generation and response chaining"""
                     
