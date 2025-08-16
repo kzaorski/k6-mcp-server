@@ -224,6 +224,7 @@ $RECYCLE.BIN/
 .nfs*
 
 # K6 specific files
+reports/
 reports/*.json
 reports/*.js
 reports/*.csv

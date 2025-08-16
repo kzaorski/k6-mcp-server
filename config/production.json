@@ -1,0 +1,54 @@
+{
+  "environment": "production",
+  "debug": false,
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "max_connections": 1000,
+    "request_timeout": 60
+  },
+  "security": {
+    "audit_log_enabled": true,
+    "rate_limit_enabled": true,
+    "rate_limit_max_requests": 100,
+    "rate_limit_window_seconds": 60,
+    "max_payload_size": 10485760,
+    "allowed_hosts": ["localhost"]
+  },
+  "k6": {
+    "k6_binary_path": "k6",
+    "default_timeout": "30s",
+    "max_virtual_users": 10000,
+    "max_duration": "24h",
+    "results_retention_days": 30,
+    "enable_html_reports": true,
+    "enable_csv_export": true
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "file_path": "/var/log/k6-mcp-server.log",
+    "max_file_size": 104857600,
+    "backup_count": 10,
+    "enable_structured_logging": true
+  },
+  "database": {
+    "url": null,
+    "pool_size": 20,
+    "max_overflow": 30,
+    "pool_timeout": 60,
+    "enable_query_logging": false
+  },
+  "performance": {
+    "cache_max_size": 50000,
+    "cache_ttl_seconds": 7200,
+    "circuit_breaker_failure_threshold": 10,
+    "circuit_breaker_timeout_seconds": 120,
+    "request_throttler_initial_rate": 500.0,
+    "request_throttler_min_rate": 50.0,
+    "request_throttler_max_rate": 5000.0,
+    "metrics_max_samples": 50000,
+    "health_check_interval_seconds": 60,
+    "memory_gc_threshold_mb": 500
+  }
+}

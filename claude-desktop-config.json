@@ -2,10 +2,12 @@
   "mcpServers": {
     "k6-performance-testing": {
       "command": "/mnt/c/dev/mcpk6/k6-mcp-server/venv/bin/python",
-      "args": ["server.py"],
+      "args": ["server_new.py"],
       "cwd": "/mnt/c/dev/mcpk6/k6-mcp-server/src",
       "env": {
-        "PYTHONPATH": "/mnt/c/dev/mcpk6/k6-mcp-server/src"
+        "PYTHONPATH": "/mnt/c/dev/mcpk6/k6-mcp-server/src",
+        "K6_MCP_ENVIRONMENT": "development",
+        "K6_MCP_CONFIG_PATH": "/mnt/c/dev/mcpk6/k6-mcp-server/config/development.json"
       }
     }
   }

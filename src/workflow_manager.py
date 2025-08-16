@@ -729,9 +729,14 @@ Use confirm_test tool with response: "y" or "n", then execute_confirmed_test
     
     async def _run_k6_workflow(self, config: K6WorkflowConfig, test_id: str, script_path: Path) -> K6WorkflowResult:
         """Execute K6 workflow and parse results."""
+        # Ensure subdirectories exist
+        import os
+        os.makedirs("csv", exist_ok=True)
+        os.makedirs("html", exist_ok=True)
+        
         # Prepare K6 command
         results_filename = f"test_{test_id}_workflow_results.json"
-        csv_filename = f"test_{test_id}_workflow_metrics.csv"
+        csv_filename = f"csv/test_{test_id}_workflow_metrics.csv"
         k6_summary_filename = f"{test_id}_k6_summary.json"  # K6's built-in summary
         
         cmd = [
@@ -746,7 +751,7 @@ Use confirm_test tool with response: "y" or "n", then execute_confirmed_test
         env = {
             **os.environ,
             "K6_WEB_DASHBOARD": "true",
-            "K6_WEB_DASHBOARD_EXPORT": f"html-report_{test_id}.html",
+            "K6_WEB_DASHBOARD_EXPORT": f"html/html-report_{test_id}.html",
             "K6_WEB_DASHBOARD_PERIOD": "1s"
         }
         

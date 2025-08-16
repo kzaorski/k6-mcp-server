@@ -979,6 +979,35 @@ async def list_tools() -> List[Tool]:
                     }
                 }
             }
+        ),
+        Tool(
+            name="analyze_url_performance",
+            description="Analyze response times per URL from K6 test results. Shows detailed performance statistics (min, max, avg, p50, p90, p95, p99) grouped by URL and HTTP method.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "test_id": {
+                        "type": "string",
+                        "description": "Specific test ID to analyze (optional - if not provided, analyzes latest test)"
+                    },
+                    "top_n": {
+                        "type": "integer",
+                        "default": 0,
+                        "description": "Show only top N slowest URLs (0 = show all)"
+                    },
+                    "group_by_domain": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Group results by domain instead of full URL"
+                    },
+                    "output_format": {
+                        "type": "string",
+                        "enum": ["table", "json"],
+                        "default": "table",
+                        "description": "Output format for results"
+                    }
+                }
+            }
         )
     ]
 
@@ -2189,6 +2218,237 @@ Use 'generate_tests_from_openapi' to create executable K6 test configurations fr
                 return {
                     "content": [
                         {"type": "text", "text": f"Error selecting endpoints: {str(e)}"}
+                    ],
+                    "isError": True
+                }
+        
+        elif name == "analyze_url_performance":
+            test_id = arguments.get("test_id")
+            top_n = arguments.get("top_n", 0)
+            group_by_domain = arguments.get("group_by_domain", False)
+            output_format = arguments.get("output_format", "table")
+            
+            try:
+                # Import analysis functions
+                import csv
+                from pathlib import Path
+                from urllib.parse import urlparse
+                from collections import defaultdict
+                import json
+                
+                def clean_url(url):
+                    """Czyści URL z parametrów query dla lepszego grupowania."""
+                    if '?' in url:
+                        return url.split('?')[0]
+                    return url
+                
+                def get_domain(url):
+                    """Wyciąga domenę z URL."""
+                    try:
+                        return urlparse(url).netloc
+                    except:
+                        return url
+                
+                def calculate_percentiles(values):
+                    """Oblicza percentyle dla listy wartości."""
+                    if not values:
+                        return {}
+                    
+                    values_sorted = sorted(values)
+                    n = len(values_sorted)
+                    
+                    def percentile(values, p):
+                        k = (n - 1) * p / 100
+                        f = int(k)
+                        c = k - f
+                        if f == n - 1:
+                            return values[f]
+                        return values[f] * (1 - c) + values[f + 1] * c
+                    
+                    return {
+                        'min': min(values),
+                        'max': max(values),
+                        'avg': sum(values) / len(values),
+                        'p50': percentile(values_sorted, 50),
+                        'p90': percentile(values_sorted, 90),
+                        'p95': percentile(values_sorted, 95),
+                        'p99': percentile(values_sorted, 99),
+                        'count': len(values)
+                    }
+                
+                def find_csv_file(test_id=None):
+                    """Znajduje plik CSV z metrykami."""
+                    # Użyj tej samej ścieżki co K6Runner i WorkflowManager
+                    reports_dir = Path(__file__).parent.parent / "reports"
+                    csv_dir = reports_dir / "csv"
+                    if not csv_dir.exists():
+                        return None
+                    
+                    if test_id:
+                        # Szukaj konkretnego test_id
+                        csv_files = list(csv_dir.glob(f"*{test_id}*_metrics.csv"))
+                        if not csv_files:
+                            csv_files = list(csv_dir.glob(f"*{test_id}*_workflow_metrics.csv"))
+                    else:
+                        # Znajdź najnowszy plik
+                        csv_files = list(csv_dir.glob("*_workflow_metrics.csv"))
+                        if not csv_files:
+                            csv_files = list(csv_dir.glob("*_metrics.csv"))
+                    
+                    if csv_files:
+                        return max(csv_files, key=lambda f: f.stat().st_mtime)
+                    return None
+                
+                def analyze_url_metrics(csv_file):
+                    """Analizuje metryki URL z pliku CSV."""
+                    url_metrics = defaultdict(lambda: defaultdict(list))
+                    
+                    with open(csv_file, 'r', encoding='utf-8') as f:
+                        reader = csv.DictReader(f)
+                        
+                        for row in reader:
+                            if row.get('metric_name') == 'http_req_duration':
+                                url = row.get('url', 'unknown')
+                                method = row.get('method', 'unknown')
+                                
+                                try:
+                                    duration = float(row.get('metric_value', 0))
+                                except ValueError:
+                                    continue
+                                
+                                # Opcjonalnie grupuj po domenie
+                                if group_by_domain:
+                                    url = get_domain(url)
+                                else:
+                                    url = clean_url(url)
+                                
+                                url_metrics[url][method].append(duration)
+                    
+                    # Oblicz statystyki
+                    results = {}
+                    for url, methods in url_metrics.items():
+                        results[url] = {}
+                        total_durations = []
+                        
+                        for method, durations in methods.items():
+                            if durations:
+                                results[url][method] = calculate_percentiles(durations)
+                                total_durations.extend(durations)
+                        
+                        # Statystyki dla całego URL
+                        if total_durations:
+                            results[url]['_total'] = calculate_percentiles(total_durations)
+                    
+                    return results
+                
+                def format_duration(ms):
+                    """Formatuje czas w ms do czytelnej postaci."""
+                    if ms < 1000:
+                        return f"{ms:.1f}ms"
+                    else:
+                        return f"{ms/1000:.2f}s"
+                
+                # Znajdź plik CSV
+                csv_file = find_csv_file(test_id)
+                if not csv_file:
+                    # Debug info
+                    reports_dir = Path(__file__).parent.parent / "reports"
+                    csv_dir = reports_dir / "csv"
+                    debug_info = f"""
+Debug Info:
+• Reports dir: {reports_dir} (exists: {reports_dir.exists()})
+• CSV dir: {csv_dir} (exists: {csv_dir.exists()})
+• Working directory: {Path.cwd()}
+• Script location: {Path(__file__).parent}"""
+                    
+                    if csv_dir.exists():
+                        csv_files = list(csv_dir.glob("*.csv"))
+                        debug_info += f"\n• CSV files found: {len(csv_files)}"
+                        if csv_files:
+                            debug_info += f"\n• Latest file: {max(csv_files, key=lambda f: f.stat().st_mtime)}"
+                    
+                    if test_id:
+                        error_msg = f"No CSV metrics file found for test ID: {test_id}\n{debug_info}"
+                    else:
+                        error_msg = f"No CSV metrics files found. Run a K6 test first to generate data.\n{debug_info}"
+                    
+                    return {
+                        "content": [
+                            {"type": "text", "text": f"❌ {error_msg}"}
+                        ],
+                        "isError": True
+                    }
+                
+                # Analizuj dane
+                results = analyze_url_metrics(csv_file)
+                
+                if not results:
+                    return {
+                        "content": [
+                            {"type": "text", "text": "❌ No http_req_duration data found in CSV file"}
+                        ],
+                        "isError": True
+                    }
+                
+                # Format wyników
+                if output_format == "json":
+                    result_text = json.dumps(results, indent=2, ensure_ascii=False)
+                else:
+                    # Format tabeli
+                    sorted_urls = sorted(
+                        results.items(), 
+                        key=lambda x: x[1].get('_total', {}).get('avg', 0), 
+                        reverse=True
+                    )
+                    
+                    if top_n > 0:
+                        sorted_urls = sorted_urls[:top_n]
+                    
+                    total_requests = sum(
+                        url_data.get('_total', {}).get('count', 0) 
+                        for _, url_data in results.items()
+                    )
+                    
+                    result_text = "🔍 **K6 URL Performance Analysis**\n"
+                    result_text += "=" * 80 + "\n"
+                    result_text += f"📊 **Podsumowanie:** {len(results)} unikalne URL, {total_requests} requestów\n"
+                    result_text += f"📁 **Dane z:** {csv_file.name}\n\n"
+                    
+                    for url, methods in sorted_urls:
+                        total_stats = methods.get('_total', {})
+                        if not total_stats:
+                            continue
+                            
+                        result_text += f"🌐 **{url}**\n"
+                        result_text += f"   📈 Ogółem: {total_stats['count']} req | "
+                        result_text += f"Avg: {format_duration(total_stats['avg'])} | "
+                        result_text += f"P95: {format_duration(total_stats['p95'])} | "
+                        result_text += f"Max: {format_duration(total_stats['max'])}\n"
+                        
+                        # Pokaż statystyki per metoda HTTP
+                        for method, stats in methods.items():
+                            if method == '_total':
+                                continue
+                                
+                            result_text += f"   ├─ {method:6}: {stats['count']:3} req | "
+                            result_text += f"Min: {format_duration(stats['min']):8} | "
+                            result_text += f"Avg: {format_duration(stats['avg']):8} | "
+                            result_text += f"P95: {format_duration(stats['p95']):8} | "
+                            result_text += f"Max: {format_duration(stats['max'])}\n"
+                        
+                        result_text += "\n"
+                
+                return {
+                    "content": [
+                        {"type": "text", "text": result_text}
+                    ]
+                }
+                
+            except Exception as e:
+                logger.error(f"Error analyzing URL performance: {str(e)}")
+                return {
+                    "content": [
+                        {"type": "text", "text": f"Error analyzing URL performance: {str(e)}"}
                     ],
                     "isError": True
                 }

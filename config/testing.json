@@ -1,0 +1,54 @@
+{
+  "environment": "testing",
+  "debug": true,
+  "server": {
+    "host": "localhost",
+    "port": 0,
+    "max_connections": 10,
+    "request_timeout": 10
+  },
+  "security": {
+    "audit_log_enabled": false,
+    "rate_limit_enabled": false,
+    "rate_limit_max_requests": 10000,
+    "rate_limit_window_seconds": 60,
+    "max_payload_size": 1048576,
+    "allowed_hosts": ["localhost", "127.0.0.1", "testhost"]
+  },
+  "k6": {
+    "k6_binary_path": "k6",
+    "default_timeout": "5s",
+    "max_virtual_users": 10,
+    "max_duration": "10m",
+    "results_retention_days": 1,
+    "enable_html_reports": false,
+    "enable_csv_export": false
+  },
+  "logging": {
+    "level": "DEBUG",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "file_path": null,
+    "max_file_size": 1048576,
+    "backup_count": 1,
+    "enable_structured_logging": false
+  },
+  "database": {
+    "url": "sqlite:///:memory:",
+    "pool_size": 1,
+    "max_overflow": 0,
+    "pool_timeout": 10,
+    "enable_query_logging": true
+  },
+  "performance": {
+    "cache_max_size": 100,
+    "cache_ttl_seconds": 300,
+    "circuit_breaker_failure_threshold": 3,
+    "circuit_breaker_timeout_seconds": 30,
+    "request_throttler_initial_rate": 10.0,
+    "request_throttler_min_rate": 1.0,
+    "request_throttler_max_rate": 100.0,
+    "metrics_max_samples": 1000,
+    "health_check_interval_seconds": 10,
+    "memory_gc_threshold_mb": 50
+  }
+}

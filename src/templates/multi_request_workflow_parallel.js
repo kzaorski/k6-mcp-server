@@ -222,12 +222,7 @@ function executeStep(step, stepIndex) {
     
     const params = {
       headers: headers,
-      timeout: step.timeout || '30s',
-      tags: {
-        endpoint: step.step_id,
-        step_name: step.name,
-        method: step.method
-      }
+      timeout: step.timeout || '30s'
     };
     
     if (workflowConfig.logRequests) {
@@ -411,12 +406,7 @@ export default function() {
         
         const params = {
           headers: headers,
-          timeout: step.timeout || '30s',
-          tags: {
-            endpoint: step.step_id,
-            step_name: step.name,
-            method: step.method
-          }
+          timeout: step.timeout || '30s'
         };
         
         // Konfiguracja dla http.batch

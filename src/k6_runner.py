@@ -532,9 +532,14 @@ Options:
                     original_error=e
                 )
             
+            # Ensure subdirectories exist
+            import os
+            os.makedirs("csv", exist_ok=True)
+            os.makedirs("html", exist_ok=True)
+            
             # Prepare K6 command with sanitized filenames
             results_filename = sanitize_filename(f"test_{safe_test_id}_results.json")
-            csv_filename = sanitize_filename(f"test_{safe_test_id}_metrics.csv")
+            csv_filename = sanitize_filename(f"csv/test_{safe_test_id}_metrics.csv")
             summary_filename = sanitize_filename(f"test_{safe_test_id}_summary.json")
             
             cmd = [
@@ -549,7 +554,7 @@ Options:
             env = {
                 **os.environ,
                 "K6_WEB_DASHBOARD": "true",
-                "K6_WEB_DASHBOARD_EXPORT": f"html-report_{safe_test_id}.html",
+                "K6_WEB_DASHBOARD_EXPORT": f"html/html-report_{safe_test_id}.html",
                 "K6_WEB_DASHBOARD_PERIOD": "1s"
             }
             
@@ -1387,7 +1392,7 @@ const csvData = new SharedArray('csv data', function () {{
         # Add reference to JSON result files
         summary_file = self.results_dir / f"test_{result.test_id}_summary.json"
         results_file = self.results_dir / f"test_{result.test_id}_results.json"
-        html_report_file = self.results_dir / f"html-report_{result.test_id}.html"
+        html_report_file = self.results_dir / "html" / f"html-report_{result.test_id}.html"
         
         report += f"\n📊 Generated Files:\n"
         if summary_file.exists():
